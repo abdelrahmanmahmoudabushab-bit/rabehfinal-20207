@@ -86,6 +86,10 @@ class Engine:
             except Exception as e:
                 log.warning("telegram failed: %s", e)
 
+    def session_close(self):
+        fn = getattr(self.market, "session_close", None)
+        return fn() if fn else None
+
     def daytrades_5d(self, db) -> int:
         """Round trips opened and closed on the same day over the last 5 business days."""
         since = self.market.now() - timedelta(days=7)
@@ -109,6 +113,7 @@ class Engine:
             mood_level=self.mood.level if self.mood else "calm",
             mood_multiplier=self.mood.risk_multiplier if self.mood else 1.0,
             daytrades_5d=max(acct.daytrade_count, self.daytrades_5d(db)),
+            session_close=self.session_close(),
             swing=u.strategy == "swing",
         )
 
@@ -195,6 +200,9 @@ class Engine:
         if refresh:
             refresh()
         self.update_mood()
+        with SessionLocal() as db:
+            self._expire_proposals(db)
+            db.commit()
         self.manage_positions()
         self.run_keepers()
         self.fill_shadows()
@@ -560,6 +568,10 @@ class Engine:
             u = self.settings_row(db)
             if not p or p.status not in ("pending", "idea"):
                 return False, "proposal is no longer open"
+            if self.market.now() - p.created_at > PROPOSAL_TTL:
+                p.status, p.status_reason = "expired", "older than 15 minutes; prices have moved"
+                db.commit()
+                return False, "this idea is older than 15 minutes — prices have moved, ask for a fresh one"
             if p.status == "idea" and u.mode == "research":
                 return False, "research mode: place this trade in your own broker app, or switch to Copilot"
             ok, msg = self.execute(db, p, u)
@@ -597,7 +609,7 @@ class Engine:
                 if t := by_sym.pop(sym, None):
                     self._close_trade(db, t, px, reason)
             now = self.market.now()
-            flatten = risk.should_flatten(now, self.session_rules) and not swing
+            flatten = risk.should_flatten(now, self.session_rules, self.session_close()) and not swing
             for t in by_sym.values():
                 opened = t.opened_at if t.opened_at.tzinfo else t.opened_at.replace(tzinfo=UTC)
                 plan = t.plan or {}
@@ -617,8 +629,13 @@ class Engine:
                 if not q:
                     continue
                 t.peak_price = max(t.peak_price or t.entry_price, q.price)
-                new_stop = (t.stop if plan.get("trail") == "none"  # the tested variant had no trail: keep it as tested
-                            else risk.trail_stop(t.entry_price, t.initial_stop, t.stop, q.price))
+                r_size = t.entry_price - t.initial_stop
+                if plan.get("trail") == "none":  # tested without a trail: manage it exactly as tested
+                    new_stop = t.stop
+                elif plan.get("trail") == "breakeven":  # tested: move to breakeven at +1R, nothing more
+                    new_stop = max(t.stop, t.entry_price) if r_size > 0 and q.price >= t.entry_price + r_size else t.stop
+                else:
+                    new_stop = risk.trail_stop(t.entry_price, t.initial_stop, t.stop, q.price)
                 if new_stop > t.stop and self.broker.update_stop(t.symbol, t.broker_order_id, new_stop):
                     t.notes = [*t.notes, {"at": now.isoformat(), "note": f"stop raised {t.stop:.2f} → {new_stop:.2f}"}]
                     t.stop = new_stop
@@ -665,6 +682,8 @@ class Engine:
                 "headlines_since_entry": [h for h in heads if h["at"] >= opened.isoformat()],
                 "mood": self.mood.level if self.mood else "calm",
                 "trail_stop": risk.trail_stop(t.entry_price, t.initial_stop, t.stop, q.price),
+                # exits validated by the backtest: code manages them, the keeper only reacts to events the test couldn't see
+                "tested_plan": t.plan if (t.plan or {}).get("variant") else None,
             }
         decision, src = self.agents.keeper(payload)
         trace = self.agents.last_trace()
@@ -676,7 +695,9 @@ class Engine:
             entry = {"at": self.market.now().isoformat(), "action": decision.action, "reason": decision.reason,
                      "confidence": decision.confidence, "by": src, "price": q.price if q else None,
                      "r": payload["position"]["r_multiple"], "skills": trace}
-            if decision.action == "tighten" and decision.new_stop and q and t.stop < decision.new_stop < q.price:
+            if decision.action == "tighten" and payload["tested_plan"]:
+                entry["action"], entry["reason"] = "hold", f"{decision.reason} (kept the tested exits — not tightening)"
+            elif decision.action == "tighten" and decision.new_stop and q and t.stop < decision.new_stop < q.price:
                 if self.broker.update_stop(t.symbol, t.broker_order_id, decision.new_stop):
                     t.notes = [*t.notes, {"at": entry["at"], "note": f"keeper raised stop {t.stop:.2f} → {decision.new_stop:.2f}"}]
                     entry["new_stop"] = decision.new_stop
@@ -701,6 +722,29 @@ class Engine:
 
     def keep_now(self, trade_id: int) -> None:
         self.run_keepers(force_trade_id=trade_id)
+
+    def reconcile(self) -> list[str]:
+        """Startup check: the broker is the truth. Close DB trades the broker no longer holds; flag positions
+        Rahbeh doesn't manage (bought by hand or while the app was down)."""
+        notes = []
+        held = {p.symbol: p for p in self.broker.positions()}
+        with self.lock, SessionLocal() as db:
+            open_trades = self.open_trades(db)
+            for t in open_trades:
+                if t.symbol not in held:
+                    q = self.market.quote(t.symbol)
+                    self._close_trade(db, t, q.price if q else t.entry_price, "closed outside app")
+                    notes.append(f"{t.symbol}: no longer held at the broker — marked closed")
+            ours = {t.symbol for t in open_trades}
+            for sym in held:
+                if sym not in ours:
+                    notes.append(f"{sym}: held at the broker but not managed by Rahbeh (no stop/target from us)")
+                    self.alert(db, "warn", f"Unmanaged position: {sym}", "Held at your broker but not opened by Rahbeh. Rahbeh will not manage it.",
+                               dedupe_key=f"unmanaged:{sym}")
+            if notes:
+                self.log(db, "reconcile", "info", "; ".join(notes))
+            db.commit()
+        return notes
 
     def set_kill_switch(self, on: bool) -> None:
         with self.lock, SessionLocal() as db:

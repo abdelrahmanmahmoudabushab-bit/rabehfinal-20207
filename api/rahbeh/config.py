@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     daily_ai_budget_usd: float = 25.0  # past this, agents fall back to free rules until tomorrow (0 = no cap)
 
     cors_origins: str = "http://localhost:3000"
+    # When set, every /api request must carry this token (the web app's proxy adds it server-side).
+    api_token: str | None = None
 
     @property
     def demo(self) -> bool:

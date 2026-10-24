@@ -72,6 +72,18 @@ class LiveMarket:
             self._clock_cache = (time.time(), is_open)
         return is_open
 
+    def session_close(self) -> datetime | None:
+        """Today's real close from Alpaca's clock (13:00 ET on half days)."""
+        ts, close = getattr(self, "_close_cache", (0.0, None))
+        if time.time() - ts > 300:
+            try:
+                c = self._trading.get_clock()
+                close = c.next_close if c.is_open else None
+            except Exception as e:
+                log.warning("clock failed: %s", e)
+            self._close_cache = (time.time(), close)
+        return close
+
     def universe(self) -> list[str]:
         return list(self._symbols)
 

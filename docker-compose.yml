@@ -11,10 +11,14 @@ services:
     env_file: ./api/.env
     environment:
       DATABASE_URL: postgresql+psycopg://rahbeh:rahbeh@db/rahbeh
+      API_TOKEN: ${API_TOKEN:?set API_TOKEN to a long random string}
     depends_on: [db]
-    ports: ["8000:8000"]
+    # no published port: only the web app talks to the API, over the internal network
   web:
     build: ./web
+    environment:
+      API_TOKEN: ${API_TOKEN:?set API_TOKEN to a long random string}
+      RAHBEH_PASSWORD: ${RAHBEH_PASSWORD:?set RAHBEH_PASSWORD to lock the app}
     depends_on: [api]
     ports: ["3000:3000"]
 volumes:

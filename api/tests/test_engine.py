@@ -78,7 +78,7 @@ def test_deal_finder_full_loop():
     for _ in range(3):
         e.cycle()
     deal_hunt = None
-    for _ in range(25):  # the demo market needs a mover; give it a few simulated minutes
+    for _ in range(90):  # the demo market needs a mover that also passes the backtest; give it simulated time
         h = hunter.Hunt(id=f"t{_}", started_at="now")
         e.hunts[h.id] = h
         hunter._hunt(e, h)
@@ -87,7 +87,7 @@ def test_deal_finder_full_loop():
             deal_hunt = h
             break
         e.cycle()
-    assert deal_hunt, "expected the deal finder to find something within 25 simulated minutes"
+    assert deal_hunt, "expected the deal finder to find something within 90 simulated minutes"
     d = deal_hunt.deal
     assert d["max_qty"] >= 1 and d["stop"] < d["entry"] < d["target"]
     assert {s["agent"] for s in deal_hunt.steps} >= {"scanner", "news", "chart", "company", "analyst", "devil", "manager", "risk"}

@@ -155,7 +155,10 @@ is set by code; explain it, don't change it. List up to 3 things to watch today.
 "hold", "tighten" (raise the stop to new_stop: above the current stop and below the current price), or "sell" now.
 Sell when the reason for the trade is gone: momentum broke (EMA 9 below EMA 21 and price below VWAP), bearish news
 since entry, the market turned stormy, or a big gain is fading (gave back half of the peak gain). The target and stop
-are already working at the broker, so do not churn: hold unless there is a clear reason. You can only reduce risk.""",
+are already working at the broker, so do not churn: hold unless there is a clear reason. You can only reduce risk.
+If tested_plan is set, the stop, target, breakeven rule and time stop were validated by a backtest and are run by code:
+then only sell for events the backtest could not see (bearish news since entry, the market turning stormy) and
+otherwise hold — do not tighten or sell on chart patterns.""",
     "analyst": """Role: Analyst. You receive reports from the News reader, Chart reader, Company checker and Market mood
 agents (team_reports), plus the raw data. Combine them into one opinion
 on whether this stock is a good long day trade right now. Score 0-100 where 65+ means "worth trading".
@@ -581,6 +584,11 @@ def rules_keeper(p: dict) -> KeeperDecision:
         return KeeperDecision(action="sell", new_stop=None, reason="Market turned stormy — locking in the gain.", confidence=75)
     if bad_news:
         return KeeperDecision(action="sell", new_stop=None, reason=f"Bearish news since entry: \"{bad_news[0]['headline']}\".", confidence=70)
+    if p.get("tested_plan"):
+        # The stop, target, breakeven rule and time stop were validated by the backtest and are run by code.
+        # Second-guessing them with untested rules would make live results drift from what was tested.
+        return KeeperDecision(action="hold", new_stop=None, confidence=60,
+                              reason=f"Following the tested exits ({r_now:+.1f}R): {p['tested_plan'].get('variant', '')}.")
     if peak_r >= 1.5 and r_now <= peak_r / 2:
         return KeeperDecision(action="sell", new_stop=None, reason=f"Gave back half the gain (peak {peak_r:.1f}R, now {r_now:.1f}R).", confidence=65)
     if r_now >= 0.5 and f["ema9"] < f["ema21"] and price < f["vwap"]:

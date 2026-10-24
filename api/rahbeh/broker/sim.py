@@ -1,6 +1,7 @@
 """Paper broker for demo mode: fills at the simulated price and works stop/target legs every bar."""
 
 import threading
+from zoneinfo import ZoneInfo
 import uuid
 from dataclasses import dataclass
 
@@ -8,6 +9,7 @@ from ..market.base import MarketData
 from .base import Account, OrderResult, Position
 
 SLIPPAGE = 0.0003  # 3 bps against us on every fill
+ET = ZoneInfo("America/New_York")
 
 
 @dataclass
@@ -28,6 +30,7 @@ class SimBroker:
         self.last_equity = starting_cash
         self._pos: dict[str, _Pos] = {}
         self._exits: list[tuple[str, float, str]] = []
+        self._day = None
         self._lock = threading.RLock()
 
     def _price(self, symbol: str) -> float:
@@ -39,6 +42,11 @@ class SimBroker:
     def account(self) -> Account:
         with self._lock:
             equity = self.cash + sum(p.qty * self._price(s) for s, p in self._pos.items())
+            today = self.market.now().astimezone(ET).date()
+            if self._day is None:
+                self._day = today
+            elif today != self._day:  # new trading day: "today's P&L" starts from here
+                self._day, self.last_equity = today, equity
         return Account(equity=equity, cash=self.cash, buying_power=self.cash, last_equity=self.last_equity)
 
     def positions(self) -> list[Position]:

@@ -6,7 +6,7 @@ agent cannot raise risk past them.
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from ..broker.base import Account, Position
@@ -77,6 +77,7 @@ class RiskContext:
     mood_multiplier: float = 1.0  # scales risk per trade
     daytrades_5d: int = 0  # day trades in the last 5 business days
     swing: bool = False  # swing mode holds overnight, so the trade is not a day trade
+    session_close: datetime | None = None  # today's real close (half days close at 13:00)
 
 
 @dataclass
@@ -125,8 +126,9 @@ def evaluate(req: TradeRequest, ctx: RiskContext, limits: Limits) -> RiskDecisio
 
     if ctx.session_rules:
         et = ctx.now.astimezone(ET).time()
-        add("session", FIRST_ENTRY_ET <= et <= LAST_ENTRY_ET,
-            f"new trades allowed {FIRST_ENTRY_ET:%H:%M}–{LAST_ENTRY_ET:%H:%M} ET (now {et:%H:%M})")
+        last = last_entry_time(ctx.session_close)
+        add("session", FIRST_ENTRY_ET <= et <= last,
+            f"new trades allowed {FIRST_ENTRY_ET:%H:%M}–{last:%H:%M} ET (now {et:%H:%M})")
 
     add("market_mood", ctx.mood_level != "stormy",
         f"market mood {ctx.mood_level}" + ("" if ctx.mood_multiplier == 1 else f" — size x{ctx.mood_multiplier:g}"))
@@ -179,8 +181,19 @@ def evaluate(req: TradeRequest, ctx: RiskContext, limits: Limits) -> RiskDecisio
     return RiskDecision(approved, qty if approved else 0, round(qty * max(per_share_risk, 0), 2), checks)
 
 
-def should_flatten(now: datetime, session_rules: bool) -> bool:
-    return session_rules and now.astimezone(ET).time() >= FLATTEN_ET
+def last_entry_time(session_close: datetime | None) -> time:
+    if session_close is None:
+        return LAST_ENTRY_ET
+    return min(LAST_ENTRY_ET, (session_close.astimezone(ET) - timedelta(minutes=30)).time())
+
+
+def should_flatten(now: datetime, session_rules: bool, session_close: datetime | None = None) -> bool:
+    """Close everything 10 minutes before the bell: 15:50 normally, 12:50 on half days."""
+    if not session_rules:
+        return False
+    if session_close is not None and session_close.astimezone(ET).date() == now.astimezone(ET).date():
+        return now >= session_close - timedelta(minutes=10)
+    return now.astimezone(ET).time() >= FLATTEN_ET
 
 
 def trail_stop(entry: float, initial_stop: float, current_stop: float, price: float) -> float:

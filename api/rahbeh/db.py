@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, inspect, text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, TypeDecorator, create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from .config import get_settings
@@ -10,6 +10,28 @@ from .config import get_settings
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+class UTCDateTime(TypeDecorator):
+    """Every timestamp is stored as UTC and read back timezone-aware.
+
+    SQLite has no time zones: it compares timestamps as text and silently drops the offset of an aware value,
+    so a New York midnight would be compared as if it were UTC (4–5 hours off). Normalising here makes that
+    whole class of bug impossible."""
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        value = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return value.replace(tzinfo=None) if dialect.name == "sqlite" else value
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 class Base(DeclarativeBase):
@@ -36,7 +58,7 @@ class UserSettings(Base):
     language: Mapped[str] = mapped_column(String(4), default="en")
     kill_switch: Mapped[bool] = mapped_column(Boolean, default=False)
     autopilot_unlocked: Mapped[bool] = mapped_column(Boolean, default=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
 
 class Proposal(Base):
@@ -44,7 +66,7 @@ class Proposal(Base):
 
     __tablename__ = "proposals"
     id: Mapped[int] = mapped_column(primary_key=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
     side: Mapped[str] = mapped_column(String(8), default="buy")
     score: Mapped[int] = mapped_column(Integer)
@@ -78,8 +100,8 @@ class Trade(Base):
     initial_stop: Mapped[float] = mapped_column(Float)
     stop: Mapped[float] = mapped_column(Float)
     target: Mapped[float] = mapped_column(Float)
-    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
-    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+    closed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -98,7 +120,7 @@ class DecisionLog(Base):
 
     __tablename__ = "decision_log"
     id: Mapped[int] = mapped_column(primary_key=True)
-    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     symbol: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     stage: Mapped[str] = mapped_column(String(32), index=True)
     outcome: Mapped[str] = mapped_column(String(16))  # no | yes | info | alert
@@ -111,7 +133,7 @@ class AgentCall(Base):
 
     __tablename__ = "agent_calls"
     id: Mapped[int] = mapped_column(primary_key=True)
-    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     agent: Mapped[str] = mapped_column(String(32))
     symbol: Mapped[str | None] = mapped_column(String(16), nullable=True)
     model: Mapped[str] = mapped_column(String(64))
@@ -127,7 +149,7 @@ class AgentCall(Base):
 class Review(Base):
     __tablename__ = "reviews"
     id: Mapped[int] = mapped_column(primary_key=True)
-    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     day: Mapped[str] = mapped_column(String(10), index=True)
     stats: Mapped[dict] = mapped_column(JSON)
     summary: Mapped[str] = mapped_column(Text)
@@ -140,7 +162,7 @@ class Review(Base):
 class EquitySnapshot(Base):
     __tablename__ = "equity_snapshots"
     id: Mapped[int] = mapped_column(primary_key=True)
-    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     equity: Mapped[float] = mapped_column(Float)
     benchmark: Mapped[float] = mapped_column(Float)  # SPY price at the same moment
 
@@ -148,7 +170,7 @@ class EquitySnapshot(Base):
 class Alert(Base):
     __tablename__ = "alerts"
     id: Mapped[int] = mapped_column(primary_key=True)
-    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     level: Mapped[str] = mapped_column(String(8))  # info | warn | critical
     title: Mapped[str] = mapped_column(String(200))
     body: Mapped[str] = mapped_column(Text, default="")
@@ -160,7 +182,7 @@ class StoredBar(Base):
 
     __tablename__ = "bars"
     symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
-    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(UTCDateTime(), primary_key=True)
     o: Mapped[float] = mapped_column(Float)
     h: Mapped[float] = mapped_column(Float)
     l: Mapped[float] = mapped_column(Float)  # noqa: E741
@@ -174,7 +196,7 @@ class Shadow(Base):
 
     __tablename__ = "shadow_scores"
     id: Mapped[int] = mapped_column(primary_key=True)
-    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
     symbol: Mapped[str] = mapped_column(String(16))
     price: Mapped[float] = mapped_column(Float)
     threshold: Mapped[int] = mapped_column(Integer)
@@ -192,7 +214,7 @@ class HistBar(Base):
     __tablename__ = "hist_bars"
     symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
     tf: Mapped[str] = mapped_column(String(4), primary_key=True)
-    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(UTCDateTime(), primary_key=True)
     o: Mapped[float] = mapped_column(Float)
     h: Mapped[float] = mapped_column(Float)
     l: Mapped[float] = mapped_column(Float)  # noqa: E741
@@ -203,17 +225,27 @@ class HistBar(Base):
 class Briefing(Base):
     __tablename__ = "briefings"
     id: Mapped[int] = mapped_column(primary_key=True)
-    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     day: Mapped[str] = mapped_column(String(10), index=True)
     language: Mapped[str] = mapped_column(String(4))
     body: Mapped[str] = mapped_column(Text)
 
 
 _settings = get_settings()
+_sqlite = _settings.database_url.startswith("sqlite")
 engine = create_engine(
     _settings.database_url,
-    connect_args={"check_same_thread": False} if _settings.database_url.startswith("sqlite") else {},
+    connect_args={"check_same_thread": False, "timeout": 30} if _sqlite else {},
 )
+
+if _sqlite:
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_conn, _record):
+        # WAL lets the scanner, the deal finder and API requests read while another thread writes
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA busy_timeout=30000")
+        cur.close()
 SessionLocal = sessionmaker(engine, expire_on_commit=False)
 
 

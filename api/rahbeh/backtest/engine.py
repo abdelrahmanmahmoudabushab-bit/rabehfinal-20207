@@ -70,6 +70,15 @@ class Indicators:
     orh: np.ndarray  # opening-range high (NaN until the range is complete)
 
 
+MIN_STOP_PCT = 0.0016  # just inside the live risk engine's limits (0.15%–8%), so every tested trade is tradable live
+MAX_STOP_PCT = 0.079
+
+
+def risk_size(raw, entry):
+    """Stop distance, clipped to what the live risk engine accepts."""
+    return np.clip(raw, entry * MIN_STOP_PCT, entry * MAX_STOP_PCT)
+
+
 def _ema(x: np.ndarray, n: int) -> np.ndarray:
     k = 2 / (n + 1)
     out = np.empty_like(x)
@@ -170,7 +179,7 @@ def simulate(s: Series, ind: Indicators, sig_idx: np.ndarray, slip_bps: float) -
     pct_out = np.empty((S, len(EXITS)))
     rows = np.arange(S)
     for e_i, (k, tgt, trail, hold) in enumerate(EXITS):
-        R = np.maximum(k * atr, entry * 0.001)
+        R = risk_size(k * atr, entry)
         stop0 = entry - R
         target = entry + tgt * R
         end = np.minimum(day_end, hold - 1)
@@ -370,6 +379,9 @@ def run(series: list[Series], setups: list[str] | None = None, slip_bps: float =
             verdict = "edge" if not reasons else "no_edge"
         if verdict == "edge":
             reasons.append(f"best in-sample variant held up out of sample: {o['exp_r']:+.2f}R per trade over {int(o['n'])} trades")
+    elif applicable is not None and not any(x["applicable"] for x in rows):
+        reasons.append(f"the live trade passes none of the tested filters (relative volume {applicable['rvol']:.2f}x, "
+                       f"RSI {applicable['rsi']:.0f}; the loosest filter needs ≥{min(RVOL_FILTERS)}x)")
     else:
         reasons.append(f"no variant had {crit.min_is_trades}+ in-sample trades")
 

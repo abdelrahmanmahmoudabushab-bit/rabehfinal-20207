@@ -7,7 +7,10 @@ from typing import Literal
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import FastAPI, HTTPException
+import hmac
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -81,9 +84,12 @@ async def lifespan(_: FastAPI):
     engine = build_engine()
     if settings.demo:
         _demo_restart_cleanup(engine)
+    else:
+        for note in engine.reconcile():
+            log.warning("reconcile: %s", note)
     scheduler.add_job(_safe_cycle, "interval", seconds=settings.scan_interval_seconds, max_instances=1, coalesce=True,
                       next_run_time=datetime.now(UTC) + timedelta(seconds=3))
-    scheduler.add_job(_safe_review, CronTrigger(hour=16, minute=30, timezone="America/New_York"))
+    scheduler.add_job(_safe_review, CronTrigger(day_of_week="mon-fri", hour=16, minute=30, timezone="America/New_York"))
     scheduler.start()
     log.info("Rahbeh started (demo=%s, claude=%s)", settings.demo, settings.claude_enabled)
     yield
@@ -91,6 +97,16 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Rahbeh API", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def require_token(request: Request, call_next):
+    """Anyone who can reach the API could otherwise place trades. With API_TOKEN set, no token = no access."""
+    if settings.api_token and request.url.path.startswith("/api"):
+        given = request.headers.get("x-rahbeh-token", "")
+        if not hmac.compare_digest(given.encode(), settings.api_token.encode()):
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
 app.add_middleware(CORSMiddleware, allow_origins=[o.strip() for o in settings.cors_origins.split(",")],
                    allow_methods=["*"], allow_headers=["*"])
 

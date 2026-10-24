@@ -94,6 +94,10 @@ def _hunt(e: Engine, h: Hunt) -> None:
     # 2. Scanner ranks the whole market
     ranking, summary = skills.call(e, "scan_market", {"limit": 30})
     held = {p.symbol for p in e.broker.positions()}
+    with SessionLocal() as db:
+        from sqlalchemy import select
+
+        open_ideas = set(db.scalars(select(Proposal.symbol).where(Proposal.status.in_(["pending", "idea"]))).all())
     h.ranking = ranking
     h.step("scanner", f"Ranked {len(ranking)} stocks by momentum, volume, news tone and trend. Top: "
            + ", ".join(f"{r['symbol']} ({r['score']:.0f})" for r in ranking[:5]), by="code",
@@ -104,6 +108,9 @@ def _hunt(e: Engine, h: Hunt) -> None:
         sym = r["symbol"]
         if sym in held:
             h.step("scanner", "Already holding — skipped.", sym, ok=False)
+            continue
+        if sym in open_ideas:
+            h.step("scanner", "Already has an open trade idea — skipped.", sym, ok=False)
             continue
         if r["trend"] == "down" or r["news_sentiment"] < -0.15:
             continue

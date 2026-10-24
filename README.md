@@ -132,6 +132,13 @@ web/   Next.js 16 + Tailwind 4 + shadcn/ui + lightweight-charts, black/white the
 
 Run the tests: `cd api && .venv/bin/python -m pytest`.
 
+## Security
+
+- **App password:** set `RAHBEH_PASSWORD` for the web app and every visitor gets a login prompt. The username is `rahbeh`, or set `RAHBEH_USER`.
+- **API token:** set `API_TOKEN` on both the web app and the API. The API then rejects any request without the token, and the web app adds it server-side so the browser never sees it.
+- **Docker:** `docker compose` requires both settings and doesn't publish the API port at all.
+- **Without them:** run it only on your own machine (`./dev.sh` listens on localhost).
+
 ## Honest limits of this version
 
 - **Single user.** There are no accounts or login, and no Stripe yet. Run it locally or behind your own auth before exposing it.

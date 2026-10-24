@@ -70,7 +70,8 @@ class Backtester:
         note = None
         if setup is None:
             setup, note = "momentum", "no clean setup on the latest bar, so the trade was tested as a momentum entry"
-        key = (symbol, setup)
+        applicable = tuple((vals["rvol"] >= rv, vals["rsi"] < cap) for rv, cap in bt.FILTERS)
+        key = (symbol, setup, applicable)
         with self._lock:
             hit = self._trade_cache.get(key)
         if hit and time.time() - hit[0] < 300:
@@ -86,11 +87,11 @@ class Backtester:
                     "at": datetime.now(UTC).isoformat()})
         if res.best:
             v = res.best["variant"]
-            atr5 = max(vals["atr"], vals["price"] * 0.001)
             price = vals["price"]
+            r = bt.risk_size(v["stop_atr"] * vals["atr"], price)  # same floor/ceiling as the simulation
             out["tuned_plan"] = {
-                "entry": round(price, 2), "stop": round(price - v["stop_atr"] * atr5, 2),
-                "target": round(price + v["target_r"] * v["stop_atr"] * atr5, 2),
+                "entry": round(price, 2), "stop": round(price - r, 2),
+                "target": round(price + v["target_r"] * r, 2),
                 "max_hold_min": None if v["max_hold"] >= 999 else v["max_hold"] * 5, "trail": v["trail"],
                 "expected_r": round(res.best["oos"]["exp_r"], 3), "variant": res.best["key"],
             }

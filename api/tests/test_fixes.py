@@ -105,7 +105,7 @@ def test_swing_mode_skips_forced_close():
     import rahbeh.engine as eng
 
     orig = eng.risk.should_flatten
-    eng.risk.should_flatten = lambda now, rules: True
+    eng.risk.should_flatten = lambda now, rules, close=None: True
     try:
         px = e.market.quote("AAPL").price
         assert e.broker.submit_bracket("AAPL", 1, px * 0.9, px * 1.2, px).ok
