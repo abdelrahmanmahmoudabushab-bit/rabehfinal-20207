@@ -18,6 +18,9 @@ from .engine import Engine
 from .market.universe import FUNDAMENTALS, sector_of
 from .pipeline import features, halal, risk
 from .pipeline.agents import Agents
+from .team import hunter
+from .team.registry import AGENTS
+from .team.skills import SKILLS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("rahbeh")
@@ -124,6 +127,7 @@ def trade_out(t: Trade, price: float | None = None) -> dict:
         "entry_price": t.entry_price, "initial_stop": t.initial_stop, "stop": t.stop, "target": t.target,
         "opened_at": iso(t.opened_at), "closed_at": iso(t.closed_at), "exit_price": t.exit_price,
         "exit_reason": t.exit_reason, "pnl": t.pnl, "r_multiple": t.r_multiple, "mode": t.mode, "notes": t.notes,
+        "origin": t.origin, "peak_price": t.peak_price, "keeper_log": t.keeper_log or [],
     }
     if price is not None and t.closed_at is None:
         d["price"] = price
@@ -429,55 +433,11 @@ def market_mood():
 
 
 def _agent_roster() -> list[dict]:
-    claude = settings.claude_enabled
-    full = claude and settings.agent_team == "full"
-
-    def kind(uses_claude: bool) -> str:
-        return "claude" if uses_claude else "rules"
-
     return [
-        {"id": "data_checks", "name": "Data checks", "kind": "code", "when": "always",
-         "job": "Rejects gaps, impossible jumps, zero volume, stale prices and sources that disagree; pauses the stock.",
-         "reads": ["prices", "minute bars", "second price source"], "writes": "data OK / pause", "module": "pipeline/checks.py"},
-        {"id": "scanner", "name": "Scanner (LAYA)", "kind": "code", "when": "starter",
-         "job": "Finds stocks moving on news or heavy trading; only the top few reach the paid agents.",
-         "reads": ["feature scores", "headlines"], "writes": "ranked shortlist", "module": "pipeline/laya.py"},
-        {"id": "halal", "name": "Halal checker", "kind": "code", "when": "early add",
-         "job": "Screens out banks, alcohol, tobacco, gambling, weapons and heavy debt for users who switch it on.",
-         "reads": ["business type", "debt", "cash"], "writes": "pass / fail", "module": "pipeline/halal.py"},
-        {"id": "news", "name": "News reader", "kind": kind(full), "when": "split out",
-         "job": "Reads headlines and filings as they land: bullish or bearish, company or market, already priced in?",
-         "reads": ["headlines", "SEC filings"], "writes": "news report", "agent_key": "news"},
-        {"id": "chart", "name": "Chart reader", "kind": kind(full), "when": "split out",
-         "job": "Trend, momentum and price patterns; names the setup, support and resistance.",
-         "reads": ["candles", "VWAP", "EMA", "RSI", "volume"], "writes": "chart report", "agent_key": "chart"},
-        {"id": "company", "name": "Company checker", "kind": kind(full), "when": "split out",
-         "job": "Earnings, debt and company health; flags earnings within two days.",
-         "reads": ["fundamentals", "earnings dates & surprises", "analyst ratings", "filings"], "writes": "company report", "agent_key": "company"},
-        {"id": "mood", "name": "Market mood", "kind": kind(full), "when": "split out",
-         "job": "Interest rates, VIX, oil and the economic calendar; says when to be careful (halves size or stops new trades).",
-         "reads": ["VIX", "Fed funds", "10-year yield", "oil", "economic calendar", "S&P 500", "breadth"], "writes": "calm / careful / stormy", "agent_key": "mood"},
-        {"id": "analyst", "name": "Analyst", "kind": kind(claude), "when": "starter",
-         "job": "Combines the specialists' reports into one opinion and a 0-100 score.",
-         "reads": ["all specialist reports", "reviewer lessons"], "writes": "score + thesis", "agent_key": "analyst"},
-        {"id": "devil", "name": "Devil's advocate", "kind": kind(claude), "when": "early add",
-         "job": "Argues against every trade; the objection must be answered or the trade dies.",
-         "reads": ["analyst report", "raw data"], "writes": "strongest objection", "agent_key": "devil"},
-        {"id": "manager", "name": "Manager", "kind": kind(claude), "when": "starter",
-         "job": "Final call: answers the objection and sets entry, stop and target.",
-         "reads": ["analyst", "devil's advocate"], "writes": "trade plan", "agent_key": "manager"},
-        {"id": "risk", "name": "Risk engine", "kind": "code", "when": "always",
-         "job": "Plain code with the final say: 1% risk cap, daily loss stop, exposure, earnings blackout, market mood, kill switch.",
-         "reads": ["trade plan", "account", "positions", "market mood", "earnings date"], "writes": "approved size / block", "module": "pipeline/risk.py"},
-        {"id": "broker", "name": "Order placer", "kind": "code", "when": "always",
-         "job": "Sends bracket orders, raises stops, closes everything by 15:50 ET.",
-         "reads": ["approved order"], "writes": "fills", "module": "broker/"},
-        {"id": "reviewer", "name": "Reviewer", "kind": kind(claude), "when": "starter",
-         "job": "After the close, grades every trade, writes lessons, and changes a rule only if it beats the live version.",
-         "reads": ["trades", "every 'no'", "S&P 500"], "writes": "lessons + rule change", "agent_key": "reviewer"},
-        {"id": "coach", "name": "Coach", "kind": kind(claude), "when": "later",
-         "job": "Explains trades and answers questions in Arabic or English (the AI button).",
-         "reads": ["anything on screen"], "writes": "answers, daily briefing", "agent_key": "coach"},
+        {"id": a.id, "name": a.name, "job": a.job, "when": a.when, "plan_no": a.plan_no, "reads": a.data, "writes": a.writes,
+         "module": a.module, "kind": a.kind(settings.claude_enabled, settings.agent_team), "agent_key": a.id,
+         "apis": a.apis, "skills": [{"name": n, "description": SKILLS[n].description, "sources": SKILLS[n].sources} for n in a.skills]}
+        for a in AGENTS
     ]
 
 
@@ -489,8 +449,11 @@ def agents_overview():
         runs = db.scalars(select(Proposal).order_by(Proposal.id.desc()).limit(12)).all()
         nos = db.scalars(select(DecisionLog).where(DecisionLog.stage == "score").order_by(DecisionLog.id.desc()).limit(1)).all()
     stats: dict[str, dict] = {}
+    skill_use: dict[str, int] = {}
     for c in calls:
         key = "coach" if c.agent in ("coach", "briefing") else c.agent
+        for sk in c.skills or []:
+            skill_use[sk.get("skill", "")] = skill_use.get(sk.get("skill", ""), 0) + 1
         st = stats.setdefault(key, {"calls": 0, "errors": 0, "ms": 0, "tokens": 0})
         st["calls"] += 1
         st["errors"] += 0 if c.ok else 1
@@ -506,6 +469,8 @@ def agents_overview():
     return {
         "team_mode": settings.agent_team, "claude": settings.claude_enabled, "model": settings.claude_model if settings.claude_enabled else None,
         "agents": roster,
+        "skills": [{"name": k, "description": v.description, "sources": v.sources, "calls_24h": skill_use.get(k, 0),
+                    "used_by": [a.name for a in AGENTS if k in a.skills]} for k, v in SKILLS.items()],
         "runs": [proposal_out(p) for p in runs],
         "last_rejected": [{"at": iso(n.at), "symbol": n.symbol, "reason": n.reason, "detail": n.detail} for n in nos],
     }
@@ -519,6 +484,61 @@ def sources():
     rows.append({"name": "Telegram", "provides": "Phone alerts", "status": "connected" if settings.telegram_bot_token else "missing_key",
                  "env": "TELEGRAM_BOT_TOKEN", "note": ""})
     return rows
+
+
+# ---- deal finder -----------------------------------------------------------------------------
+def _hunt_out(h) -> dict:
+    d = h.to_dict()
+    if h.trade_id:
+        e = E()
+        with SessionLocal() as db:
+            t = db.get(Trade, h.trade_id)
+            if t:
+                q = e.market.quote(t.symbol)
+                d["trade"] = trade_out(t, q.price if q else None)
+    return d
+
+
+@app.post("/api/hunt")
+def hunt_start():
+    return _hunt_out(hunter.start(E()))
+
+
+@app.get("/api/hunt/latest")
+def hunt_latest():
+    e = E()
+    h = e.hunts.get(e.latest_hunt_id) if e.latest_hunt_id else None
+    return _hunt_out(h) if h else None
+
+
+@app.get("/api/hunt/{hunt_id}")
+def hunt_get(hunt_id: str):
+    h = E().hunts.get(hunt_id)
+    if not h:
+        raise HTTPException(404, "unknown hunt")
+    return _hunt_out(h)
+
+
+class BuyIn(BaseModel):
+    qty: int = Field(ge=1)
+
+
+@app.post("/api/hunt/{hunt_id}/buy")
+def hunt_buy(hunt_id: str, body: BuyIn):
+    ok, msg, _ = hunter.buy(E(), hunt_id, body.qty)
+    if not ok:
+        raise HTTPException(409, msg)
+    return _hunt_out(E().hunts[hunt_id])
+
+
+@app.post("/api/trades/{tid}/keep")
+def keep_now(tid: int):
+    E().keep_now(tid)
+    with SessionLocal() as db:
+        t = db.get(Trade, tid)
+        if not t:
+            raise HTTPException(404, "unknown trade")
+        return trade_out(t)
 
 
 @app.get("/api/reviews")

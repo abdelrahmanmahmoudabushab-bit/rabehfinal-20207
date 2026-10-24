@@ -8,6 +8,7 @@ the app still works end to end — proposals say which one produced them.
 
 import json
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Literal, TypeVar
@@ -17,9 +18,25 @@ from pydantic import BaseModel
 
 from ..config import Settings
 from ..db import AgentCall, SessionLocal
+from ..team import skills
+from ..team.registry import BY_ID
+from ..team.skills import SKILLS
 
 log = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
+MAX_TOOL_TURNS = 4
+SKILL_NOTE = """
+
+You have your own skills (tools) for fetching data. The message already contains the data the engine gathered;
+call a skill only when you need something that is missing or want a fresher or different view (e.g. another
+candle timeframe). Never invent data a skill could have told you."""
+
+
+def _block(b) -> dict:
+    """Echo a response block back on the next turn, unchanged except for the SDK's local parse cache."""
+    d = b.model_dump(mode="json", exclude_none=True)
+    d.pop("parsed_output", None)
+    return d
 
 
 # ---- structured outputs ----------------------------------------------------------------
@@ -51,6 +68,13 @@ class CompanyReport(BaseModel):
 class MoodReport(BaseModel):
     summary: str
     watch_out_for: list[str]
+
+
+class KeeperDecision(BaseModel):
+    action: Literal["hold", "tighten", "sell"]
+    new_stop: float | None
+    reason: str
+    confidence: int  # 0-100
 
 
 class AnalystReport(BaseModel):
@@ -113,6 +137,11 @@ are due within two days. List concrete red flags only if the data shows them."""
     "mood": """Role: Market mood. Read the VIX, rates, oil, the S&P 500 move, breadth and today's economic calendar.
 In 2-3 plain sentences say how risky the market is right now and what could move it. The level (calm/careful/stormy)
 is set by code; explain it, don't change it. List up to 3 things to watch today.""",
+    "keeper": """Role: Position keeper. You watch one open long day trade and decide what to do right now:
+"hold", "tighten" (raise the stop to new_stop: above the current stop and below the current price), or "sell" now.
+Sell when the reason for the trade is gone: momentum broke (EMA 9 below EMA 21 and price below VWAP), bearish news
+since entry, the market turned stormy, or a big gain is fading (gave back half of the peak gain). The target and stop
+are already working at the broker, so do not churn: hold unless there is a clear reason. You can only reduce risk.""",
     "analyst": """Role: Analyst. You receive reports from the News reader, Chart reader, Company checker and Market mood
 agents (team_reports), plus the raw data. Combine them into one opinion
 on whether this stock is a good long day trade right now. Score 0-100 where 65+ means "worth trading".
@@ -135,68 +164,86 @@ class Agents:
     def __init__(self, s: Settings):
         self.s = s
         self.client = anthropic.Anthropic(api_key=s.anthropic_api_key, max_retries=2) if s.claude_enabled else None
+        self.engine = None
+        self._local = threading.local()
 
     @property
     def source(self) -> str:
         return "claude" if self.client else "heuristic"
 
     # ---- Claude plumbing ------------------------------------------------------------------
+    def bind(self, engine) -> None:
+        """Give the agents access to their skills (tools), which read data through the engine."""
+        self.engine = engine
+
+    def last_trace(self) -> list[dict]:
+        """Skills the most recent agent call on this thread used: [{skill, args, summary}]."""
+        return list(getattr(self._local, "trace", []))
+
+    def _rules_trace(self, agent: str) -> None:
+        spec = BY_ID.get(agent)
+        self._local.trace = [{"skill": n, "args": {}, "summary": "read by the rule-based agent"} for n in (spec.skills if spec else [])]
+
     def _parse(self, agent: str, symbol: str | None, payload: dict, schema: type[T]) -> T:
-        assert self.client is not None
-        started = time.monotonic()
-        rec = AgentCall(agent=agent, symbol=symbol, model=self.s.claude_model)
-        try:
-            resp = self.client.beta.messages.parse(
-                model=self.s.claude_model,
-                max_tokens=16000,
-                system=[
-                    {"type": "text", "text": SYSTEM},
-                    {"type": "text", "text": ROLE[agent], "cache_control": {"type": "ephemeral"}},
-                ],
-                messages=[{"role": "user", "content": json.dumps(payload, default=str, indent=1)}],
-                output_format=schema,
-                output_config={"effort": self.s.agent_effort},
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
-            )
-            rec.input_tokens = resp.usage.input_tokens
-            rec.output_tokens = resp.usage.output_tokens
-            rec.cache_read_tokens = resp.usage.cache_read_input_tokens or 0
-            if resp.stop_reason == "refusal":
-                raise RuntimeError("model declined the request")
-            if resp.stop_reason == "max_tokens" or resp.parsed_output is None:
-                raise RuntimeError(f"no structured output (stop_reason={resp.stop_reason})")
-            return resp.parsed_output
-        except Exception as e:
-            rec.ok, rec.error = False, f"{type(e).__name__}: {e}"[:500]
-            raise
-        finally:
-            rec.latency_ms = int((time.monotonic() - started) * 1000)
-            with SessionLocal() as db:
-                db.add(rec)
-                db.commit()
+        return self._run(agent, symbol, json.dumps(payload, default=str, indent=1), schema)
 
     def _text(self, agent: str, system: str, prompt: str) -> str:
+        return self._run(agent, None, prompt, None, role_text=system, effort="low")
+
+    def _run(self, agent: str, symbol: str | None, content: str, schema: type[T] | None,
+             role_text: str | None = None, effort: str | None = None):
+        """One agent turn. The agent may call its own skills (tools) a few times before answering."""
         assert self.client is not None
+        spec = BY_ID.get(agent)
+        tools = [SKILLS[n].tool() for n in spec.skills] if spec and self.engine is not None else []
+        messages: list[dict] = [{"role": "user", "content": content}]
+        trace: list[dict] = []
+        self._local.trace = trace
         started = time.monotonic()
-        rec = AgentCall(agent=agent, model=self.s.claude_model)
+        rec = AgentCall(agent=agent, symbol=symbol, model=self.s.claude_model, input_tokens=0, output_tokens=0, cache_read_tokens=0)
+        system = [{"type": "text", "text": SYSTEM},
+                  {"type": "text", "text": (role_text or ROLE[agent]) + (SKILL_NOTE if tools else ""), "cache_control": {"type": "ephemeral"}}]
         try:
-            resp = self.client.beta.messages.create(
-                model=self.s.claude_model, max_tokens=16000,
-                system=[{"type": "text", "text": SYSTEM}, {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": prompt}],
-                output_config={"effort": "low"},
-                betas=["server-side-fallback-2026-07-01"], fallbacks="default",
-            )
-            rec.input_tokens, rec.output_tokens = resp.usage.input_tokens, resp.usage.output_tokens
-            if resp.stop_reason == "refusal":
-                raise RuntimeError("model declined the request")
-            return "".join(b.text for b in resp.content if b.type == "text").strip()
+            for turn in range(MAX_TOOL_TURNS + 1):
+                kwargs: dict = dict(
+                    model=self.s.claude_model, max_tokens=16000, system=system, messages=messages,
+                    output_config={"effort": effort or self.s.agent_effort},
+                    betas=["server-side-fallback-2026-07-01"], fallbacks="default",
+                )
+                if tools:
+                    kwargs["tools"] = tools
+                    if turn == MAX_TOOL_TURNS:
+                        kwargs["tool_choice"] = {"type": "none"}  # out of lookups: answer with what you have
+                resp = (self.client.beta.messages.parse(**kwargs, output_format=schema) if schema
+                        else self.client.beta.messages.create(**kwargs))
+                rec.input_tokens += resp.usage.input_tokens
+                rec.output_tokens += resp.usage.output_tokens
+                rec.cache_read_tokens += resp.usage.cache_read_input_tokens or 0
+                if resp.stop_reason == "refusal":
+                    raise RuntimeError("model declined the request")
+                if resp.stop_reason == "tool_use" and tools:
+                    messages.append({"role": "assistant", "content": [_block(b) for b in resp.content]})
+                    results = []
+                    for b in resp.content:
+                        if b.type == "tool_use":
+                            out, summary = skills.call(self.engine, b.name, dict(b.input or {}))
+                            trace.append({"skill": b.name, "args": dict(b.input or {}), "summary": summary})
+                            results.append({"type": "tool_result", "tool_use_id": b.id,
+                                            "content": json.dumps(out, default=str)[:15000]})
+                    messages.append({"role": "user", "content": results})
+                    continue
+                if schema is None:
+                    return "".join(b.text for b in resp.content if b.type == "text").strip()
+                if resp.stop_reason == "max_tokens" or resp.parsed_output is None:
+                    raise RuntimeError(f"no structured output (stop_reason={resp.stop_reason})")
+                return resp.parsed_output
+            raise RuntimeError("agent kept calling tools without answering")
         except Exception as e:
             rec.ok, rec.error = False, f"{type(e).__name__}: {e}"[:500]
             raise
         finally:
             rec.latency_ms = int((time.monotonic() - started) * 1000)
+            rec.skills = trace
             with SessionLocal() as db:
                 db.add(rec)
                 db.commit()
@@ -206,7 +253,10 @@ class Agents:
         """News reader, Chart reader and Company checker. In the starter team they are rule-based (free);
         with AGENT_TEAM=full each is its own Claude agent, run in parallel."""
         rules = {"news": rules_news(ctx), "chart": rules_chart(ctx), "company": rules_company(ctx)}
-        out = {k: {**v.model_dump(), "by": "rules"} for k, v in rules.items()}
+        out = {}
+        for k, v in rules.items():
+            self._rules_trace(k)
+            out[k] = {**v.model_dump(), "by": "rules", "skills": self.last_trace()}
         if not (self.client and self.s.agent_team == "full"):
             return out
         schemas = {"news": NewsReport, "chart": ChartReport, "company": CompanyReport}
@@ -215,11 +265,17 @@ class Agents:
             "chart": {k: ctx.get(k) for k in ("symbol", "as_of", "features", "suggested_levels")},
             "company": {k: ctx.get(k) for k in ("symbol", "as_of", "company", "earnings", "ratings", "filings")},
         }
+
+        def run(k):  # runs in a worker thread, so collect that thread's skill trace there
+            res = self._parse(k, ctx["symbol"], views[k], schemas[k])
+            return res, self.last_trace()
+
         with ThreadPoolExecutor(max_workers=3) as pool:
-            futs = {k: pool.submit(self._parse, k, ctx["symbol"], views[k], schemas[k]) for k in schemas}
+            futs = {k: pool.submit(run, k) for k in schemas}
             for k, f in futs.items():
                 try:
-                    out[k] = {**f.result().model_dump(), "by": "claude"}
+                    res, trace = f.result()
+                    out[k] = {**res.model_dump(), "by": "claude", "skills": trace}
                 except Exception as e:
                     log.warning("%s agent fell back to rules: %s", k, e)
         return out
@@ -232,6 +288,15 @@ class Agents:
                 log.warning("mood agent fell back to rules: %s", e)
         return {"summary": mood.get("summary", ""), "watch_out_for": [e["event"] for e in mood.get("events", [])[:3]], "by": "rules"}
 
+    def keeper(self, payload: dict) -> tuple[KeeperDecision, str]:
+        if self.client:
+            try:
+                return self._parse("keeper", payload["position"]["symbol"], payload, KeeperDecision), "claude"
+            except Exception as e:
+                log.warning("keeper fell back to rules: %s", e)
+        self._rules_trace("keeper")
+        return rules_keeper(payload), "rules"
+
     # ---- agents ---------------------------------------------------------------------------
     def analyst(self, ctx: dict) -> tuple[AnalystReport, str]:
         if self.client:
@@ -239,6 +304,7 @@ class Agents:
                 return self._parse("analyst", ctx["symbol"], ctx, AnalystReport), "claude"
             except Exception as e:
                 log.warning("analyst fell back to heuristic: %s", e)
+        self._rules_trace("analyst")
         return _heuristic_analyst(ctx), "heuristic"
 
     def devil(self, ctx: dict, report: AnalystReport) -> tuple[DevilReport, str]:
@@ -247,6 +313,7 @@ class Agents:
                 return self._parse("devil", ctx["symbol"], {**ctx, "analyst_report": report.model_dump()}, DevilReport), "claude"
             except Exception as e:
                 log.warning("devil fell back to heuristic: %s", e)
+        self._rules_trace("devil")
         return _heuristic_devil(ctx, report), "heuristic"
 
     def manager(self, ctx: dict, report: AnalystReport, devil: DevilReport) -> tuple[ManagerDecision, str]:
@@ -256,6 +323,7 @@ class Agents:
                 return self._parse("manager", ctx["symbol"], payload, ManagerDecision), "claude"
             except Exception as e:
                 log.warning("manager fell back to heuristic: %s", e)
+        self._rules_trace("manager")
         return _heuristic_manager(ctx, report, devil), "heuristic"
 
     def reviewer(self, payload: dict) -> tuple[ReviewerReport, str]:
@@ -264,6 +332,7 @@ class Agents:
                 return self._parse("reviewer", None, payload, ReviewerReport), "claude"
             except Exception as e:
                 log.warning("reviewer fell back to heuristic: %s", e)
+        self._rules_trace("reviewer")
         return _heuristic_reviewer(payload), "heuristic"
 
     def briefing(self, payload: dict, language: str) -> str:
@@ -466,3 +535,24 @@ def rules_company(ctx: dict) -> CompanyReport:
         view = f"{rat['strong_buy'] + rat['buy']} buy / {rat['hold']} hold / {rat['sell'] + rat['strong_sell']} sell (score {rat['score']:.1f}/5)"
     return CompanyReport(health=health, earnings_risk=risk, analyst_view=view, red_flags=flags,
                          summary=f"{co.get('name', ctx['symbol'])}: {health} health, net margin {margin:.0%}, debt {debt:.0%} of market value; analysts {view}.")
+
+
+def rules_keeper(p: dict) -> KeeperDecision:
+    pos, f = p["position"], p["features"]
+    price, r_now, peak_r = pos["price"], pos.get("r_multiple") or 0.0, p.get("peak_r") or 0.0
+    bad_news = [h for h in p.get("headlines_since_entry", []) if h.get("sentiment", 0) <= -0.3]
+    if p.get("mood") == "stormy" and r_now > 0:
+        return KeeperDecision(action="sell", new_stop=None, reason="Market turned stormy — locking in the gain.", confidence=75)
+    if bad_news:
+        return KeeperDecision(action="sell", new_stop=None, reason=f"Bearish news since entry: \"{bad_news[0]['headline']}\".", confidence=70)
+    if peak_r >= 1.5 and r_now <= peak_r / 2:
+        return KeeperDecision(action="sell", new_stop=None, reason=f"Gave back half the gain (peak {peak_r:.1f}R, now {r_now:.1f}R).", confidence=65)
+    if r_now >= 0.5 and f["ema9"] < f["ema21"] and price < f["vwap"]:
+        return KeeperDecision(action="sell", new_stop=None, reason="Momentum broke: EMA 9 under EMA 21 and price under VWAP.", confidence=60)
+    trail = p.get("trail_stop") or pos["stop"]
+    if f["rsi14"] > 85 and r_now >= 1.5:
+        trail = max(trail, round(price - max(f["atr14"], price * 0.001) * 2, 2))
+    if trail > pos["stop"] and trail < price:
+        return KeeperDecision(action="tighten", new_stop=round(trail, 2), reason=f"Up {r_now:.1f}R — raising the stop to protect the gain.", confidence=70)
+    return KeeperDecision(action="hold", new_stop=None,
+                          reason=f"Working as planned ({r_now:+.1f}R); stop and target are live at the broker.", confidence=55)

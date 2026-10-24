@@ -6,6 +6,7 @@ export type Lang = "en" | "ar";
 
 const en = {
   chart: "Chart",
+  deals: "Deal finder",
   portfolio: "Portfolio",
   agents: "Agents",
   dashboard: "Dashboard",
@@ -64,6 +65,7 @@ const en = {
 
 const ar: typeof en = {
   chart: "الرسم البياني",
+  deals: "صائد الصفقات",
   portfolio: "المحفظة",
   agents: "الوكلاء",
   dashboard: "لوحة التحكم",

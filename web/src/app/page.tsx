@@ -373,6 +373,12 @@ function InfoPanel({
               <span className={cn("num text-sm font-bold", tone(position.unrealized))}>{signedMoney(position.unrealized)}</span>
             </div>
             <PlanRow entry={position.entry_price} stop={position.stop} target={position.target} />
+            {position.keeper_log?.length ? (
+              <div className="border p-2 text-xs">
+                <span className="font-mono text-[10px] uppercase">Keeper · {position.keeper_log[position.keeper_log.length - 1].action}: </span>
+                {position.keeper_log[position.keeper_log.length - 1].reason}
+              </div>
+            ) : null}
             <ClosePosition t={position} />
           </div>
         </Section>

@@ -78,6 +78,70 @@ export interface Trade {
   unrealized?: number;
   r_now?: number | null;
   thesis?: string | null;
+  origin?: string;
+  peak_price?: number | null;
+  keeper_log?: KeeperEntry[];
+}
+
+export interface SkillUse {
+  skill: string;
+  args?: Record<string, unknown>;
+  summary: string;
+}
+
+export interface KeeperEntry {
+  at: string;
+  action: "hold" | "tighten" | "sell";
+  reason: string;
+  confidence: number;
+  by: string;
+  price: number | null;
+  r: number;
+  new_stop?: number;
+  checks?: number;
+  skills: SkillUse[];
+}
+
+export interface HuntStep {
+  at: string;
+  agent: string;
+  symbol: string | null;
+  text: string;
+  by: string;
+  skills: SkillUse[];
+  ok: boolean | null;
+}
+
+export interface Hunt {
+  id: string;
+  started_at: string;
+  status: "running" | "found" | "no_deal" | "failed" | "bought";
+  steps: HuntStep[];
+  ranking: { symbol: string; score: number; price: number; change_day_pct: number; volume_ratio: number; trend: string; news_sentiment: number }[];
+  candidates: { symbol: string; name: string; score: number; direction: string; thesis: string; price: number; change_day_pct: number }[];
+  deal: {
+    symbol: string;
+    name: string;
+    score: number;
+    thesis: string;
+    entry: number;
+    stop: number;
+    target: number;
+    max_qty: number;
+    risk_per_share: number;
+    reward_per_share: number;
+    exit_plan: string;
+    devil: Proposal["devil"];
+    manager: Proposal["manager"];
+    team: TeamReports;
+    risk_checks: RiskCheck[];
+    mood: string;
+  } | null;
+  proposal_id: number | null;
+  trade_id: number | null;
+  trade?: Trade;
+  finished_at: string | null;
+  message: string;
 }
 
 export interface AlertItem {
@@ -201,10 +265,13 @@ export interface AgentInfo {
   name: string;
   kind: "claude" | "rules" | "code";
   when: string;
+  plan_no: number | null;
   job: string;
   reads: string[];
   writes: string;
   module?: string;
+  apis: string[];
+  skills: { name: string; description: string; sources: string[] }[];
   calls_24h: number;
   errors_24h: number;
   avg_ms: number | null;
@@ -216,6 +283,7 @@ export interface AgentsOverview {
   claude: boolean;
   model: string | null;
   agents: AgentInfo[];
+  skills: { name: string; description: string; sources: string[]; calls_24h: number; used_by: string[] }[];
   runs: Proposal[];
 }
 

@@ -86,6 +86,9 @@ class Trade(Base):
     broker_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mode: Mapped[str] = mapped_column(String(16), default="copilot")
     notes: Mapped[list] = mapped_column(JSON, default=list)  # stop raises etc.
+    origin: Mapped[str] = mapped_column(String(16), default="scanner")  # scanner | deal_finder | chart
+    peak_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    keeper_log: Mapped[list] = mapped_column(JSON, default=list)  # Position keeper verdicts, newest last
 
 
 class DecisionLog(Base):
@@ -116,6 +119,7 @@ class AgentCall(Base):
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     ok: Mapped[bool] = mapped_column(Boolean, default=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    skills: Mapped[list] = mapped_column(JSON, default=list)  # tools the agent called: [{skill, args, summary}]
 
 
 class Review(Base):

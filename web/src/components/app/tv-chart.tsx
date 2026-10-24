@@ -120,6 +120,7 @@ export function TvChart({
   colored,
   className,
   onLegend,
+  levels,
 }: {
   bars: Candle[];
   trades: Trade[];
@@ -128,6 +129,8 @@ export function TvChart({
   colored: boolean;
   className?: string;
   onLegend?: (l: Legend | null) => void;
+  /** Planned entry/stop/target to draw when there is no open trade yet (deal finder). */
+  levels?: { entry: number; stop: number; target: number };
 }) {
   const el = useRef<HTMLDivElement>(null);
   const chart = useRef<IChartApi | null>(null);
@@ -142,6 +145,7 @@ export function TvChart({
     lines: IPriceLine[];
   }>({ lines: [] });
   const fitted = useRef(false);
+  const lineLevels = useRef<number[]>([]); // entry/stop/target: the price scale always keeps these in view
   const [ready, setReady] = useState(0);
   const legendCb = useRef(onLegend);
   const barsRef = useRef(bars);
@@ -187,6 +191,12 @@ export function TvChart({
       wickUpColor: up,
       wickDownColor: down,
       priceLineColor: pal.cross,
+      autoscaleInfoProvider: (original: () => { priceRange: { minValue: number; maxValue: number } } | null) => {
+        const res = original();
+        const lv = lineLevels.current;
+        if (!res || !lv.length) return res;
+        return { ...res, priceRange: { minValue: Math.min(res.priceRange.minValue, ...lv), maxValue: Math.max(res.priceRange.maxValue, ...lv) } };
+      },
     });
     if (indicators.volume) {
       s.volume = c.addSeries(HistogramSeries, { priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
@@ -272,7 +282,8 @@ export function TvChart({
 
     s.lines.forEach((l) => s.candles!.removePriceLine(l));
     s.lines = [];
-    const open = trades.find((tr) => !tr.closed_at);
+    const open = trades.find((tr) => !tr.closed_at) ?? (levels ? { entry_price: levels.entry, stop: levels.stop, target: levels.target } : undefined);
+    lineLevels.current = open ? [open.entry_price, open.stop, open.target] : [];
     if (open) {
       s.lines.push(
         s.candles.createPriceLine({ price: open.entry_price, color: pal.cross, lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: true, title: "ENTRY" }),
@@ -285,7 +296,7 @@ export function TvChart({
       c.timeScale().fitContent();
       fitted.current = true;
     }
-  }, [bars, trades, derived, ready, colored, pal]);
+  }, [bars, trades, derived, ready, colored, pal, levels]);
 
   return <div ref={el} className={cn("h-full w-full", className)} />;
 }

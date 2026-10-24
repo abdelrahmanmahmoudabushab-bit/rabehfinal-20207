@@ -21,7 +21,7 @@ const STAGES: { title: string; note: string; ids: string[]; flow?: "row" | "chai
   { title: "3 · Specialists", note: "run side by side", ids: ["news", "chart", "company", "mood"], edge: "four reports" },
   { title: "4 · Decide", note: "each must agree to go on", ids: ["analyst", "devil", "manager"], flow: "chain", edge: "trade proposal" },
   { title: "5 · Safety check", note: "plain code, final say", ids: ["risk"], highlight: true, edge: "approved order" },
-  { title: "6 · Trade", note: "your broker", ids: ["broker"], edge: "results" },
+  { title: "6 · Trade and keep", note: "your broker + the AI watcher", ids: ["broker", "keeper"], edge: "results" },
   { title: "7 · Learn", note: "after the close", ids: ["reviewer"], edge: "" },
 ];
 
@@ -97,7 +97,7 @@ export default function AgentsPage() {
               <CardDescription>
                 {selected && (
                   <span className="font-mono text-[11px] uppercase">
-                    {KIND[selected.kind]} · {selected.when}
+                    {selected.plan_no ? `plan #${selected.plan_no} · ` : ""}{KIND[selected.kind]} · {selected.when}
                     {selected.module && ` · ${selected.module}`}
                   </span>
                 )}
@@ -117,6 +117,27 @@ export default function AgentsPage() {
                 <div>
                   <div className="text-muted-foreground mb-1 font-mono text-[10px] uppercase">Hands on</div>
                   <span className="text-[13px]">{selected.writes}</span>
+                </div>
+                <div>
+                  <div className="text-muted-foreground mb-1 font-mono text-[10px] uppercase">APIs</div>
+                  <div className="flex flex-wrap gap-1">
+                    {selected.apis.map((r) => (
+                      <span key={r} className="bg-foreground text-background rounded-sm px-1.5 py-0.5 text-[11px]">{r}</span>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground mb-1 font-mono text-[10px] uppercase">
+                    Skills {selected.kind === "claude" ? "(tools it can call)" : selected.kind === "rules" ? "(data the rules read)" : "(functions it runs)"}
+                  </div>
+                  <ul className="space-y-1.5">
+                    {selected.skills.map((k) => (
+                      <li key={k.name} className="text-xs">
+                        <span className="font-mono font-semibold">{k.name}</span>
+                        <span className="text-muted-foreground"> — {k.description}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
                 {selected.kind !== "code" && (
                   <div className="grid grid-cols-3 gap-2 border-t pt-3 font-mono text-[11px]">
@@ -138,6 +159,7 @@ export default function AgentsPage() {
       </div>
 
       <RunTrace runs={data?.runs} />
+      <SkillsCard skills={data?.skills} />
       <MoodCard />
       <SourcesTable sources={sources} />
     </>
@@ -165,6 +187,14 @@ function Node({ a, active, onClick }: { a: AgentInfo; active: boolean; onClick: 
         </span>
       </div>
       <span className="text-muted-foreground line-clamp-2 text-[11px] leading-snug">{a.job}</span>
+      {a.skills.length > 0 && (
+        <span className="flex flex-wrap gap-1">
+          {a.skills.slice(0, 3).map((k) => (
+            <span key={k.name} className="text-muted-foreground border px-1 font-mono text-[9px]">{k.name}</span>
+          ))}
+          {a.skills.length > 3 && <span className="text-muted-foreground font-mono text-[9px]">+{a.skills.length - 3}</span>}
+        </span>
+      )}
       {a.kind !== "code" && a.calls_24h > 0 && <span className="text-muted-foreground font-mono text-[10px]">{a.calls_24h} calls today</span>}
     </button>
   );
@@ -407,6 +437,48 @@ function SourcesTable({ sources }: { sources?: Source[] }) {
                   </TableCell>
                   <TableCell className="font-mono text-[11px]">{s.env || "—"}</TableCell>
                   <TableCell className="text-muted-foreground text-xs whitespace-normal">{s.note}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---- skills catalog ------------------------------------------------------------------------------
+function SkillsCard({ skills }: { skills?: AgentsOverview["skills"] }) {
+  return (
+    <Card className="mt-4" id="skills">
+      <CardHeader>
+        <CardTitle>Skills</CardTitle>
+        <CardDescription>
+          The tools agents can call. Each agent only gets the skills for its own job — the News reader can&apos;t place orders, the Position keeper can&apos;t buy.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {!skills ? (
+          <Skeleton className="h-40" />
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Skill</TableHead>
+                <TableHead>What it does</TableHead>
+                <TableHead>Data / API</TableHead>
+                <TableHead>Used by</TableHead>
+                <TableHead className="text-end">Calls 24h</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {skills.map((k) => (
+                <TableRow key={k.name}>
+                  <TableCell className="font-mono text-xs font-semibold">{k.name}</TableCell>
+                  <TableCell className="text-muted-foreground max-w-72 text-xs whitespace-normal">{k.description}</TableCell>
+                  <TableCell className="text-xs whitespace-normal">{k.sources.join(", ")}</TableCell>
+                  <TableCell className="text-muted-foreground max-w-56 text-xs whitespace-normal">{k.used_by.join(", ")}</TableCell>
+                  <TableCell className="num text-end text-xs">{k.calls_24h}</TableCell>
                 </TableRow>
               ))}
             </TableBody>

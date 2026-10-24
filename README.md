@@ -46,11 +46,23 @@ The **Agents** page in the app shows each source's live status. Each source is o
 
 These are not wired yet: short interest, unusual options activity, earnings call transcripts, and Gulf/Egypt prices with Arabic news. Each needs a paid or regional data vendor.
 
+## Deal finder (full loop on one page)
+
+The **Deal finder** page runs the whole trade in four steps:
+
+1. **Hunt:** the team checks the market mood. The Scanner ranks every stock, and the top few (`HUNT_DEPTH`, default 5) get the News reader, Chart reader, Company checker and Analyst. The best goes to the Devil's advocate, the Manager and the risk engine. If it fails, the next best is tried.
+2. **Approve:** you see the deal on a chart with entry, stop and target, then choose the number of shares. You can't go above what the risk engine allows. The page shows the cost, the loss if the stop is hit, and the gain if the target is hit.
+3. **Watch:** a bracket order is placed. The **Position keeper** agent re-checks the trade every cycle (with Claude, every `KEEPER_INTERVAL_SECONDS`). It can hold, raise the stop or sell, but it can only reduce risk.
+4. **Sold:** the result is shown, and the Reviewer learns from it after the close.
+
+Every hand-off appears live in the agent feed, with the skills each agent used.
+
 ## The agent team
 
 - **Specialists:** News reader, Chart reader, Company checker and Market mood each write a report.
 - **Decision:** the Analyst combines the reports and scores the trade. The Devil's advocate argues against it, and the Manager answers the objection and sets the plan.
 - **Safety:** the plain-code risk engine has the final say.
+- **Own job, data, APIs and skills:** every agent from the plan is defined in `api/rahbeh/team/registry.py`, and each skill (tool) is backed by one data source (`team/skills.py`). With Claude, an agent can call only its own skills. The News reader can't place orders, and the Position keeper can't buy.
 - **Team size:** `AGENT_TEAM=starter` (the default) runs the specialists as free rules. `AGENT_TEAM=full` makes each specialist its own Claude agent, at roughly twice the agent cost.
 - **Market mood** sets position size: *calm* means full size, *careful* means half size, and *stormy* means no new trades.
 - **Earnings:** no new position is opened when a company reports today or tomorrow.

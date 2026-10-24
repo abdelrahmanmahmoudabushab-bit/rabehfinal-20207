@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     # starter: specialists (news, chart, company, mood) are rule-based and only the Analyst, Devil's advocate,
     # Manager, Reviewer and Coach call Claude. full: every specialist is its own Claude agent (about 2x the cost).
     agent_team: str = "starter"
+    hunt_depth: int = 5  # deal finder: how many top-ranked stocks get the full specialist + analyst review
+    keeper_interval_seconds: int = 300  # how often the Claude Position keeper re-checks each open trade (rules run every cycle)
 
     # Broker and data. Without Alpaca keys the app runs on the built-in market simulator.
     alpaca_api_key: str | None = None

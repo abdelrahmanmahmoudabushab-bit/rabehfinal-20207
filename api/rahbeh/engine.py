@@ -33,6 +33,10 @@ class Engine:
     def __init__(self, s: Settings, market: MarketData, broker: Broker, agents: Agents, extras: Extras | None = None):
         self.s, self.market, self.broker, self.agents = s, market, broker, agents
         self.extras: Extras = extras or (SimExtras(market) if s.demo else LiveExtras(s))
+        self.agents.bind(self)
+        self.hunts: dict = {}  # deal finder runs (team/hunter.py), kept in memory
+        self.latest_hunt_id: str | None = None
+        self._hunt_lock = threading.Lock()
         self.mood: mood.Mood | None = None
         self.mood_report: dict = {}
         self._mood_report_at = 0.0
@@ -173,6 +177,7 @@ class Engine:
             refresh()
         self.update_mood()
         self.manage_positions()
+        self.run_keepers()
         summary = self.scan() if self.market.is_open() else {"skipped": "market closed"}
         self.snapshot()
         self.last_cycle = datetime.now(UTC)
@@ -378,6 +383,10 @@ class Engine:
             if created < cutoff:
                 p.status, p.status_reason = "expired", "price may have moved; proposals last 15 minutes"
 
+    def _latest_lessons_safe(self) -> list[str]:
+        with SessionLocal() as db:
+            return self._latest_lessons(db)
+
     def _latest_lessons(self, db) -> list[str]:
         r = db.scalar(select(Review).order_by(Review.id.desc()))
         return list(r.lessons) if r else []
@@ -387,8 +396,9 @@ class Engine:
             db.merge(StoredBar(symbol=sym, ts=b.ts, o=b.o, h=b.h, l=b.l, c=b.c, v=b.v, source=self.market.name))
 
     # ---- execution -------------------------------------------------------------------------
-    def execute(self, db, prop: Proposal, u: UserSettings) -> tuple[bool, str]:
-        """Re-check risk at the current price, then send the bracket order."""
+    def execute(self, db, prop: Proposal, u: UserSettings, qty: int | None = None, origin: str = "scanner") -> tuple[bool, str]:
+        """Re-check risk at the current price, then send the bracket order. qty: the user's chosen size,
+        which may be smaller than, but never larger than, what the risk engine allows."""
         with self.lock:
             q = self.market.quote(prop.symbol)
             if not q:
@@ -407,21 +417,26 @@ class Engine:
                 prop.status, prop.status_reason = "blocked", rd.reason
                 self.log(db, "risk", "no", rd.reason, prop.symbol, {"at_execution": True})
                 return False, rd.reason
-            res = self.broker.submit_bracket(prop.symbol, rd.qty, stop, target, entry)
+            if qty is not None and qty > rd.qty:
+                return False, f"the risk engine allows at most {rd.qty} shares right now"
+            size = qty if qty is not None else rd.qty
+            if size < 1:
+                return False, "quantity must be at least 1"
+            res = self.broker.submit_bracket(prop.symbol, size, stop, target, entry)
             if not res.ok:
                 prop.status, prop.status_reason = "blocked", res.message
                 self.log(db, "broker", "no", res.message, prop.symbol)
                 self.alert(db, "warn", f"Order failed: {prop.symbol}", res.message)
                 return False, res.message
             fill = res.fill_price or entry
-            prop.status, prop.qty = "executed", rd.qty
+            prop.status, prop.qty = "executed", size
             db.add(Trade(
-                proposal_id=prop.id, symbol=prop.symbol, sector=sector_of(prop.symbol), qty=rd.qty, entry_price=fill,
+                proposal_id=prop.id, symbol=prop.symbol, sector=sector_of(prop.symbol), qty=size, entry_price=fill,
                 initial_stop=stop, stop=stop, target=target, broker_order_id=res.order_id, mode=u.mode,
-                opened_at=self.market.now(), notes=[],
+                opened_at=self.market.now(), notes=[], origin=origin, peak_price=fill, keeper_log=[],
             ))
-            self.log(db, "execution", "yes", f"bought {rd.qty} @ {fill:.2f}", prop.symbol)
-            self.alert(db, "info", f"Bought {rd.qty} {prop.symbol} @ {fill:.2f}", f"Stop {stop:.2f} · Target {target:.2f}\n{prop.thesis}")
+            self.log(db, "execution", "yes", f"bought {size} @ {fill:.2f}", prop.symbol)
+            self.alert(db, "info", f"Bought {size} {prop.symbol} @ {fill:.2f}", f"Stop {stop:.2f} · Target {target:.2f}\n{prop.thesis}")
             return True, "executed"
 
     def approve(self, proposal_id: int) -> tuple[bool, str]:
@@ -481,11 +496,90 @@ class Engine:
                 q = self.market.quote(t.symbol)
                 if not q:
                     continue
+                t.peak_price = max(t.peak_price or t.entry_price, q.price)
                 new_stop = risk.trail_stop(t.entry_price, t.initial_stop, t.stop, q.price)
                 if new_stop > t.stop and self.broker.update_stop(t.symbol, t.broker_order_id, new_stop):
                     t.notes = [*t.notes, {"at": now.isoformat(), "note": f"stop raised {t.stop:.2f} → {new_stop:.2f}"}]
                     t.stop = new_stop
             db.commit()
+
+    # ---- Position keeper ---------------------------------------------------------------------
+    def run_keepers(self, force_trade_id: int | None = None) -> None:
+        """Ask the Position keeper about every open trade. Agent calls happen outside the lock;
+        decisions are applied under it, and can only lower risk (sell, or raise the stop)."""
+        interval = self.s.keeper_interval_seconds if self.agents.client else 0
+        now = self.market.now()
+        with SessionLocal() as db:
+            due = []
+            for t in self.open_trades(db):
+                last = t.keeper_log[-1]["at"] if t.keeper_log else None
+                if force_trade_id == t.id or not last or (now - datetime.fromisoformat(last)).total_seconds() >= interval:
+                    due.append(t.id)
+        for tid in due:
+            try:
+                self._keep(tid)
+            except Exception:
+                log.exception("keeper failed for trade %s", tid)
+
+    def _keep(self, trade_id: int) -> None:
+        with SessionLocal() as db:
+            t = db.get(Trade, trade_id)
+            if not t or t.closed_at:
+                return
+            q = self.market.quote(t.symbol)
+            bars = self.market.minute_bars(t.symbol, 240)
+            if not q or len(bars) < 2:
+                return
+            f = features.compute(bars, self.market.daily_bars(t.symbol, 60)).to_dict()
+            r = t.entry_price - t.initial_stop
+            opened = t.opened_at if t.opened_at.tzinfo else t.opened_at.replace(tzinfo=UTC)
+            heads = laya.evaluate(t.symbol, features.compute(bars, self.market.daily_bars(t.symbol, 60)),
+                                  self.market.news([t.symbol], 30), self.market.now(), lookback_min=24 * 60).headlines
+            payload = {
+                "position": {"symbol": t.symbol, "qty": t.qty, "entry": t.entry_price, "stop": t.stop, "initial_stop": t.initial_stop,
+                             "target": t.target, "price": q.price, "r_multiple": round((q.price - t.entry_price) / r, 2) if r > 0 else 0,
+                             "unrealized": round((q.price - t.entry_price) * t.qty, 2), "minutes_open": int((self.market.now() - opened).total_seconds() // 60)},
+                "peak_r": round(((t.peak_price or t.entry_price) - t.entry_price) / r, 2) if r > 0 else 0,
+                "features": f,
+                "headlines_since_entry": [h for h in heads if h["at"] >= opened.isoformat()],
+                "mood": self.mood.level if self.mood else "calm",
+                "trail_stop": risk.trail_stop(t.entry_price, t.initial_stop, t.stop, q.price),
+            }
+        decision, src = self.agents.keeper(payload)
+        trace = self.agents.last_trace()
+        with self.lock, SessionLocal() as db:
+            t = db.get(Trade, trade_id)
+            if not t or t.closed_at:
+                return
+            q = self.market.quote(t.symbol)
+            entry = {"at": self.market.now().isoformat(), "action": decision.action, "reason": decision.reason,
+                     "confidence": decision.confidence, "by": src, "price": q.price if q else None,
+                     "r": payload["position"]["r_multiple"], "skills": trace}
+            if decision.action == "tighten" and decision.new_stop and q and t.stop < decision.new_stop < q.price:
+                if self.broker.update_stop(t.symbol, t.broker_order_id, decision.new_stop):
+                    t.notes = [*t.notes, {"at": entry["at"], "note": f"keeper raised stop {t.stop:.2f} → {decision.new_stop:.2f}"}]
+                    entry["new_stop"] = decision.new_stop
+                    t.stop = decision.new_stop
+            elif decision.action == "tighten":
+                entry["action"], entry["reason"] = "hold", f"{decision.reason} (stop change not valid, kept {t.stop:.2f})"
+            elif decision.action == "sell":
+                res = self.broker.close(t.symbol)
+                if res.ok:
+                    self._close_trade(db, t, res.fill_price or (q.price if q else t.entry_price), "ai sell")
+                    self.log(db, "keeper", "info", f"Position keeper sold: {decision.reason}", t.symbol)
+                else:
+                    entry["reason"] += f" (sell failed: {res.message})"
+            prev = list(t.keeper_log or [])
+            if prev and prev[-1]["action"] == "hold" and entry["action"] == "hold":
+                entry["checks"] = prev[-1].get("checks", 1) + 1  # merge repeated holds into one line
+                prev[-1] = entry
+            else:
+                prev.append(entry)
+            t.keeper_log = prev[-40:]
+            db.commit()
+
+    def keep_now(self, trade_id: int) -> None:
+        self.run_keepers(force_trade_id=trade_id)
 
     def set_kill_switch(self, on: bool) -> None:
         with self.lock, SessionLocal() as db:

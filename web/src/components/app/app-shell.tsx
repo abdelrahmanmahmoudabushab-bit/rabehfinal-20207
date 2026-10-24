@@ -20,6 +20,7 @@ import { cn } from "@/lib/utils";
 
 const NAV: { href: string; key: Key }[] = [
   { href: "/", key: "chart" },
+  { href: "/deals", key: "deals" },
   { href: "/portfolio", key: "portfolio" },
   { href: "/agents", key: "agents" },
   { href: "/ideas", key: "ideas" },
