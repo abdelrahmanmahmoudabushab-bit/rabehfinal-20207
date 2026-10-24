@@ -36,7 +36,7 @@ function toDraft(s: Settings): Draft {
 
 export default function SettingsPage() {
   const { data } = useApi<Settings>("/settings", { refreshInterval: 0 });
-  if (!data) return <Skeleton className="h-96 rounded-xl" />;
+  if (!data) return <Skeleton className="h-96 rounded-md" />;
   return <SettingsForm data={data} />;
 }
 
@@ -102,7 +102,7 @@ function SettingsForm({ data }: { data: Settings }) {
                     save({ mode: m.id });
                   }}
                   className={cn(
-                    "relative flex flex-col gap-2 rounded-xl border p-4 text-start transition-colors",
+                    "relative flex flex-col gap-2 rounded-md border p-4 text-start transition-colors",
                     active ? "border-primary bg-primary/5 ring-primary/30 ring-2" : "hover:border-foreground/20",
                     locked ? "cursor-not-allowed opacity-60" : "cursor-pointer",
                   )}

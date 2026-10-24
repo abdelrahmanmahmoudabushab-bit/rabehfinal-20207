@@ -45,3 +45,14 @@ def test_full_loop():
 
     review = e.review()
     assert review.summary and review.change_verdict
+
+
+def test_candles_and_analyze():
+    e = make_engine()
+    for tf in ("1m", "5m", "1h", "1D"):
+        bars = e.market.history("AAPL", tf, 300)
+        assert bars and all(a.ts < b.ts for a, b in zip(bars, bars[1:])), tf
+    res = e.analyze("AAPL", propose=True)
+    assert res["verdict"] in ("trade", "no trade")
+    assert {g["name"] for g in res["gates"]} >= {"Data OK", "Score line", "Risk engine"}
+    assert (res["proposal_id"] is not None) == (res["verdict"] == "trade")

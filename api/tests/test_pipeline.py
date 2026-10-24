@@ -53,3 +53,14 @@ def test_halal_screen():
     levered = Fundamentals("C", "C", "Utilities", "Power", 100e9, 10e9, 2e9, 40e9, 5e9)
     assert any("debt" in r for r in halal.screen(levered).reasons)
     assert not halal.screen(None).passes
+
+
+def test_aggregate_candles():
+    from rahbeh.market.base import aggregate
+
+    start = datetime(2026, 10, 21, 15, 0, tzinfo=UTC)
+    minute = [Bar(start + timedelta(minutes=i), 100 + i, 101 + i, 99 + i, 100.5 + i, 10) for i in range(12)]
+    five = aggregate(minute, 5)
+    assert len(five) == 3
+    assert five[0].o == 100 and five[0].c == 104.5 and five[0].h == 105 and five[0].l == 99 and five[0].v == 50
+    assert five[-1].v == 20  # partial last candle

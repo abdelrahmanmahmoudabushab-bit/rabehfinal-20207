@@ -47,7 +47,7 @@ export function KillSwitch({ on }: { on: boolean }) {
   return (
     <AlertDialog>
       <AlertDialogTrigger asChild>
-        <Button size="sm" variant="destructive" disabled={busy} className="shadow-[0_0_20px_-6px] shadow-red-500/60">
+        <Button size="sm" variant="outline" disabled={busy} className="border-loss/60 text-loss hover:bg-loss hover:text-white">
           <OctagonX /> <span className="hidden sm:inline">{t("killSwitch")}</span>
         </Button>
       </AlertDialogTrigger>

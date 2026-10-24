@@ -5,6 +5,8 @@ import { createContext, useCallback, useContext, useEffect, useSyncExternalStore
 export type Lang = "en" | "ar";
 
 const en = {
+  chart: "Chart",
+  portfolio: "Portfolio",
   dashboard: "Dashboard",
   ideas: "Trade ideas",
   trades: "Trades",
@@ -60,6 +62,8 @@ const en = {
 };
 
 const ar: typeof en = {
+  chart: "الرسم البياني",
+  portfolio: "المحفظة",
   dashboard: "لوحة التحكم",
   ideas: "أفكار التداول",
   trades: "الصفقات",

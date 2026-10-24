@@ -47,7 +47,7 @@ export default function ReviewPage() {
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="space-y-4 lg:col-span-2">
           {!data ? (
-            <Skeleton className="h-64 rounded-xl" />
+            <Skeleton className="h-64 rounded-md" />
           ) : !data.length ? (
             <Empty icon={<ClipboardCheck />}>The first review runs automatically at 16:30 ET, or run one now.</Empty>
           ) : (

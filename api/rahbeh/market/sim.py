@@ -11,7 +11,7 @@ import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from .base import Bar, Fundamentals, NewsItem, Quote
+from .base import TIMEFRAMES, Bar, Fundamentals, NewsItem, Quote, aggregate
 from .universe import BENCHMARK, FUNDAMENTALS, START_PRICES, SYMBOLS
 
 _GOOD = [
@@ -40,7 +40,7 @@ _MARKET = [
 class SimMarket:
     name = "simulator"
 
-    def __init__(self, seed: int = 7, history_minutes: int = 240, always_open: bool = True):
+    def __init__(self, seed: int = 7, history_minutes: int = 960, always_open: bool = True):
         self._rng = random.Random(seed)
         self._lock = threading.RLock()
         self.always_open = always_open
@@ -160,6 +160,14 @@ class SimMarket:
 
     def fundamentals(self, symbol: str) -> Fundamentals | None:
         return FUNDAMENTALS.get(symbol)
+
+    def history(self, symbol: str, timeframe: str, limit: int = 400) -> list[Bar]:
+        with self._lock:
+            minute = list(self._bars.get(symbol, []))
+        if timeframe == "1D":
+            today = aggregate(minute, 1440)[-1:] if minute else []
+            return (self.daily_bars(symbol, limit) + today)[-limit:]
+        return aggregate(minute, TIMEFRAMES.get(timeframe, 1))[-limit:]
 
 
 def _us_session_open(ts: datetime) -> bool:

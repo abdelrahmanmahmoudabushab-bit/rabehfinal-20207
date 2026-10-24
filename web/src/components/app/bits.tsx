@@ -6,7 +6,7 @@ export function PageHeader({ title, description, children }: { title: string; de
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
+        <h1 className="text-xl font-bold tracking-tight uppercase">{title}</h1>
         {description && <p className="text-muted-foreground max-w-2xl text-sm">{description}</p>}
       </div>
       {children && <div className="flex flex-wrap items-center gap-2">{children}</div>}
@@ -28,20 +28,20 @@ export function Stat({
   icon?: React.ReactNode;
 }) {
   return (
-    <div className="bg-card rounded-xl border p-4 shadow-sm">
-      <div className="text-muted-foreground flex items-center justify-between text-xs font-medium">
+    <div className="bg-card rounded-md border p-3.5">
+      <div className="text-muted-foreground flex items-center justify-between text-[11px] font-medium tracking-wide uppercase">
         {label}
         {icon}
       </div>
-      <div className={cn("tabular mt-2 text-2xl font-semibold tracking-tight", valueClass)}>{value}</div>
-      {sub && <div className="text-muted-foreground tabular mt-1 text-xs">{sub}</div>}
+      <div className={cn("num mt-1.5 text-xl font-semibold", valueClass)}>{value}</div>
+      {sub && <div className="text-muted-foreground num mt-1 text-[11px]">{sub}</div>}
     </div>
   );
 }
 
 export function Empty({ icon, children }: { icon?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className="text-muted-foreground flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed px-6 py-12 text-center text-sm">
+    <div className="text-muted-foreground flex flex-col items-center justify-center gap-3 rounded-md border border-dashed px-6 py-12 text-center text-sm">
       {icon && <div className="bg-muted grid size-10 place-items-center rounded-full [&_svg]:size-5">{icon}</div>}
       <div className="max-w-sm">{children}</div>
     </div>

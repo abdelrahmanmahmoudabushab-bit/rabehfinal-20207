@@ -1,8 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { useState } from "react";
-import { Bot, Check, CheckCircle2, MessageCircle, ShieldCheck, Swords, X, XCircle } from "lucide-react";
+import { Bot, Check, CheckCircle2, ShieldCheck, Sparkles, Swords, X, XCircle } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +11,7 @@ import { Separator } from "@/components/ui/misc";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RangeBar, ScoreRing } from "@/components/app/bits";
+import { useAi } from "@/lib/ai";
 import { api, refreshAll, type Proposal } from "@/lib/api";
 import { money, num, timeAgo } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
@@ -141,6 +141,7 @@ export function ProposalCard({ p }: { p: Proposal }) {
 
 export function ProposalSheet({ p, open, onOpenChange }: { p: Proposal; open: boolean; onOpenChange: (o: boolean) => void }) {
   const { t, lang } = useI18n();
+  const { openAi } = useAi();
   const { busy, approve, reject } = useDecision(p);
   const actionable = p.status === "pending" || p.status === "idea";
   const heads = p.features.headlines ?? [];
@@ -261,10 +262,15 @@ export function ProposalSheet({ p, open, onOpenChange }: { p: Proposal; open: bo
 
         <Separator className="mt-auto" />
         <div className="flex flex-wrap items-center gap-2 p-5 pt-0">
-          <Button variant="outline" size="sm" asChild>
-            <Link href={`/coach?proposal=${p.id}&symbol=${p.symbol}`}>
-              <MessageCircle /> {t("askWhy")}
-            </Link>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              onOpenChange(false);
+              openAi({ symbol: p.symbol, proposalId: p.id }, { prompt: lang === "ar" ? "لماذا اقترحت هذه الصفقة؟" : "Why did you propose this trade?" });
+            }}
+          >
+            <Sparkles /> {t("askWhy")}
           </Button>
           {actionable && (
             <div className="ms-auto flex gap-2">
@@ -309,7 +315,7 @@ function Bubble({
       >
         {who[0]}
       </div>
-      <div className="bg-muted/40 flex-1 rounded-xl rounded-ss-sm p-3">
+      <div className="bg-muted/40 flex-1 rounded-md rounded-ss-sm p-3">
         <div className="mb-1 flex items-center justify-between text-xs">
           <span className="font-medium">{who}</span>
           <span className="text-muted-foreground tabular">

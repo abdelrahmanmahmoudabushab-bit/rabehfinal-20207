@@ -392,6 +392,34 @@ def stock(symbol: str):
                      for n in e.market.news([sym], 10) if sym in n.symbols]}
 
 
+@app.get("/api/candles/{symbol}")
+def candles(symbol: str, tf: Literal["1m", "5m", "15m", "1h", "1D"] = "5m", limit: int = 400):
+    """OHLCV candles for the chart, plus our trades in this stock so the chart can mark entries and exits."""
+    e = E()
+    sym = symbol.upper()
+    bars = e.market.history(sym, tf, min(limit, 2000))
+    if not bars:
+        raise HTTPException(404, "no data for this symbol")
+    with SessionLocal() as db:
+        trades = db.scalars(select(Trade).where(Trade.symbol == sym).order_by(Trade.id.desc()).limit(50)).all()
+    q = e.market.quote(sym)
+    return {
+        "symbol": sym, "tf": tf,
+        "bars": [{"time": int(b.ts.timestamp()), "open": round(b.o, 4), "high": round(b.h, 4), "low": round(b.l, 4),
+                  "close": round(b.c, 4), "volume": round(b.v)} for b in bars],
+        "trades": [trade_out(t, q.price if q else None) for t in trades],
+        "last": q.price if q else bars[-1].c,
+    }
+
+
+@app.post("/api/analyze/{symbol}")
+def analyze(symbol: str, propose: bool = False):
+    try:
+        return E().analyze(symbol, propose)
+    except ValueError as err:
+        raise HTTPException(404, str(err))
+
+
 @app.get("/api/reviews")
 def reviews(limit: int = 30):
     with SessionLocal() as db:

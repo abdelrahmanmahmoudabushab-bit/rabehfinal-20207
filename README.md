@@ -4,6 +4,12 @@ A web app where a team of AI agents watches the US market, proposes day trades w
 if you allow it, places them in **your own** brokerage account under strict limits you set. Rahbeh never
 holds client money.
 
+The home screen is a TradingView-style terminal: watchlist, real candlestick charts (TradingView's open-source
+`lightweight-charts`) with volume, EMA 9/21, session VWAP and an RSI pane, your entries/exits/stop/target drawn on the
+chart, key stats, news, and an account panel. An **AI** button (or ⌘K) on every screen opens an assistant that knows
+which stock you're looking at; **Analyze with AI** runs the whole agent team on any chart and can send the result to
+Trade ideas. Black and white themes.
+
 It runs fully **out of the box with no keys** on a built-in market simulator, so you can click through every
 feature before connecting anything real.
 
@@ -50,7 +56,7 @@ api/   Python + FastAPI, SQLAlchemy (SQLite default, Postgres in Docker), APSche
   rahbeh/pipeline/  checks, features, laya, halal, risk, agents (Claude + fallbacks)
   rahbeh/engine.py  the seven checks, execution, trade management, reviewer, briefing
   tests/            risk engine, data checks, LAYA, halal, full demo loop
-web/   Next.js 16 + Tailwind 4 + shadcn/ui (dark), English/Arabic (RTL)
+web/   Next.js 16 + Tailwind 4 + shadcn/ui + lightweight-charts, black/white themes, English/Arabic (RTL)
 ```
 
 Run the tests: `cd api && .venv/bin/python -m pytest`.

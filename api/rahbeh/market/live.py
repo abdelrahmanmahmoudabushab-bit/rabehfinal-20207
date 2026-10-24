@@ -10,11 +10,11 @@ import httpx
 from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import NewsClient, StockHistoricalDataClient
 from alpaca.data.requests import NewsRequest, StockBarsRequest, StockLatestTradeRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 
 from ..config import Settings
-from .base import Bar, Fundamentals, NewsItem, Quote
+from .base import TIMEFRAMES, Bar, Fundamentals, NewsItem, Quote
 from .universe import BENCHMARK, FUNDAMENTALS, SYMBOLS
 
 log = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ class LiveMarket:
         self._fund_cache: dict[str, tuple[float, Fundamentals | None]] = {}
         self._clock_cache: tuple[float, bool] = (0.0, False)
         self._http = httpx.Client(timeout=10)
+        self._hist_cache: dict[tuple[str, str], tuple[float, list[Bar]]] = {}
 
     def refresh(self) -> None:
         """Pull the latest minute bars and trades for the whole watchlist in two requests."""
@@ -94,6 +95,30 @@ class LiveMarket:
             rows = cached[1] if cached else []
         self._daily[symbol] = (time.time(), rows)
         return rows[-limit:]
+
+    def history(self, symbol: str, timeframe: str, limit: int = 400) -> list[Bar]:
+        key = (symbol, timeframe)
+        cached = self._hist_cache.get(key)
+        if cached and time.time() - cached[0] < 30:
+            return cached[1]
+        minutes = TIMEFRAMES.get(timeframe, 1)
+        if timeframe == "1D":
+            tf, lookback = TimeFrame(1, TimeFrameUnit.Day), timedelta(days=int(limit * 1.5) + 10)
+        elif minutes >= 60:
+            tf, lookback = TimeFrame(minutes // 60, TimeFrameUnit.Hour), timedelta(days=max(10, limit // 6))
+        else:
+            tf, lookback = TimeFrame(minutes, TimeFrameUnit.Minute), timedelta(minutes=minutes * limit * 3)
+        try:
+            bs = self._data.get_stock_bars(StockBarsRequest(
+                symbol_or_symbols=symbol, timeframe=tf, start=datetime.now(UTC) - lookback,
+                feed=self._feed, adjustment=Adjustment.ALL,
+            ))
+            rows = [Bar(r.timestamp, r.open, r.high, r.low, r.close, r.volume) for r in bs.data.get(symbol, [])][-limit:]
+        except Exception as e:
+            log.warning("history failed for %s %s: %s", symbol, timeframe, e)
+            rows = cached[1] if cached else []
+        self._hist_cache[key] = (time.time(), rows)
+        return rows
 
     def quote(self, symbol: str) -> Quote | None:
         with self._lock:

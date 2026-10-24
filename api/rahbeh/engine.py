@@ -3,6 +3,7 @@ and runs the nightly review. One instance per process."""
 
 import logging
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -22,6 +23,7 @@ from .pipeline.agents import Agents, suggested_levels
 log = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 PROPOSAL_TTL = timedelta(minutes=15)
+ANALYSIS_CACHE_SECONDS = 120
 PAUSE_AFTER_BAD_DATA = timedelta(minutes=15)
 DEMO_TIME_STOP = timedelta(minutes=120)  # the always-open demo has no 15:50 close, so trades time out instead
 
@@ -36,6 +38,7 @@ class Engine:
         self.last_scan_summary: dict = {}
         self.session_rules = not (s.demo and s.demo_always_open)
         self.cycle_lock = threading.Lock()
+        self._analysis_cache: dict[str, tuple[float, tuple]] = {}
 
     # ---- helpers ---------------------------------------------------------------------------
     def settings_row(self, db) -> UserSettings:
@@ -246,6 +249,62 @@ class Engine:
         else:
             self.execute(db, prop, u)
         return True
+
+    def analyze(self, symbol: str, propose: bool = False) -> dict:
+        """Run the full agent team on one stock on request ("Analyze with AI"), skipping only the LAYA pre-filter.
+
+        Nothing is bought here. With propose=True a passing result becomes a trade idea that still needs approval.
+        """
+        sym = symbol.upper()
+        ctx = self.stock_context(sym)
+        if not ctx:
+            raise ValueError(f"no data for {sym}")
+        now = self.market.now()
+        dc = checks.check_data(self.market.minute_bars(sym, 240), self.market.quote(sym), self.market.second_quote(sym), now)
+        hr = halal.screen(self.market.fundamentals(sym))
+        with SessionLocal() as db:
+            u = self.settings_row(db)
+            cached = self._analysis_cache.get(sym)
+            if propose and cached and time.monotonic() - cached[0] < ANALYSIS_CACHE_SECONDS:
+                rep, dv, mg, src = cached[1]  # "Send to Ideas" right after an analysis: reuse it, don't pay twice
+            else:
+                ctx["lessons_from_reviewer"] = self._latest_lessons(db)
+                ctx["user_strategy"] = u.strategy
+                rep, src = self.agents.analyst(ctx)
+                dv, _ = self.agents.devil(ctx, rep)
+                mg, _ = self.agents.manager(ctx, rep, dv)
+                self._analysis_cache[sym] = (time.monotonic(), (rep, dv, mg, src))
+            rd = risk.evaluate(risk.TradeRequest(sym, sector_of(sym), mg.entry, mg.stop, mg.target), self.risk_context(db, u), self.limits(u))
+            gates = [
+                {"name": "Data OK", "passed": dc.ok, "detail": "; ".join(dc.problems) or "clean"},
+                {"name": "Halal", "passed": hr.passes or not u.halal_only,
+                 "detail": ("passes" if hr.passes else "; ".join(hr.reasons)) + ("" if u.halal_only else " (filter off)")},
+                {"name": "Score line", "passed": rep.direction == "long" and rep.score >= u.score_threshold,
+                 "detail": f"{rep.score} vs line {u.score_threshold}" + ("" if rep.direction == "long" else " — analyst says skip")},
+                {"name": "Objection answered", "passed": mg.objection_answered and mg.decision == "trade", "detail": dv.objection},
+                {"name": "Risk engine", "passed": rd.approved, "detail": rd.reason},
+            ]
+            verdict = all(g["passed"] for g in gates)
+            proposal_id = None
+            if propose and verdict:
+                prop = Proposal(
+                    symbol=sym, score=rep.score, entry=mg.entry, stop=mg.stop, target=mg.target, qty=rd.qty,
+                    risk_amount=rd.risk_amount, thesis=rep.thesis, analyst=rep.model_dump(), devil=dv.model_dump(),
+                    manager=mg.model_dump(), features={**ctx["features"], "headlines": ctx["laya"]["headlines"]},
+                    risk_checks=rd.as_list(), status="idea" if u.mode == "research" else "pending",
+                    status_reason="requested from chart", agent_source=src, created_at=now,
+                )
+                db.add(prop)
+                db.flush()
+                proposal_id = prop.id
+                self.log(db, "user", "info", f"analysis requested from chart → idea #{prop.id}", sym)
+            db.commit()
+        return {
+            "symbol": sym, "source": src, "verdict": "trade" if verdict else "no trade", "gates": gates,
+            "analyst": rep.model_dump(), "devil": dv.model_dump(), "manager": mg.model_dump(),
+            "plan": {"entry": mg.entry, "stop": mg.stop, "target": mg.target, "qty": rd.qty, "risk_amount": rd.risk_amount},
+            "risk_checks": rd.as_list(), "proposal_id": proposal_id,
+        }
 
     def _expire_proposals(self, db) -> None:
         cutoff = self.market.now() - PROPOSAL_TTL

@@ -255,3 +255,24 @@ export interface Usage {
   est_cost_24h: number;
   recent: { at: string; agent: string; symbol: string | null; model: string; in: number; out: number; ms: number; ok: boolean; error: string | null }[];
 }
+
+export interface Analysis {
+  symbol: string;
+  source: "claude" | "heuristic";
+  verdict: "trade" | "no trade";
+  gates: { name: string; passed: boolean; detail: string }[];
+  analyst: Proposal["analyst"];
+  devil: Proposal["devil"];
+  manager: Proposal["manager"];
+  plan: { entry: number; stop: number; target: number; qty: number; risk_amount: number };
+  risk_checks: RiskCheck[];
+  proposal_id: number | null;
+}
+
+export interface CandlesResponse {
+  symbol: string;
+  tf: string;
+  bars: { time: number; open: number; high: number; low: number; close: number; volume: number }[];
+  trades: Trade[];
+  last: number;
+}

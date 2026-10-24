@@ -49,6 +49,25 @@ class Fundamentals:
     business_tags: list[str] = field(default_factory=list)  # e.g. ["alcohol"], used by the halal filter
 
 
+TIMEFRAMES = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "1D": 1440}
+
+
+def aggregate(bars: list[Bar], minutes: int) -> list[Bar]:
+    """Roll 1-minute bars up into N-minute candles (bucketed on the clock, like a charting platform)."""
+    if minutes <= 1:
+        return list(bars)
+    out: list[Bar] = []
+    span = minutes * 60
+    for b in bars:
+        bucket = int(b.ts.timestamp()) // span * span
+        if out and int(out[-1].ts.timestamp()) == bucket:
+            o = out[-1]
+            out[-1] = Bar(o.ts, o.o, max(o.h, b.h), min(o.l, b.l), b.c, o.v + b.v)
+        else:
+            out.append(Bar(datetime.fromtimestamp(bucket, b.ts.tzinfo), b.o, b.h, b.l, b.c, b.v))
+    return out
+
+
 class MarketData(Protocol):
     name: str
 
@@ -61,3 +80,4 @@ class MarketData(Protocol):
     def second_quote(self, symbol: str) -> Quote | None: ...
     def news(self, symbols: list[str] | None = None, limit: int = 50) -> list[NewsItem]: ...
     def fundamentals(self, symbol: str) -> Fundamentals | None: ...
+    def history(self, symbol: str, timeframe: str, limit: int = 400) -> list[Bar]: ...
