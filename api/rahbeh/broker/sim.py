@@ -45,11 +45,14 @@ class SimBroker:
         with self._lock:
             return [Position(s, p.qty, p.avg, self._price(s)) for s, p in self._pos.items()]
 
-    def submit_bracket(self, symbol: str, qty: int, stop: float, target: float, ref_price: float) -> OrderResult:
+    def submit_bracket(self, symbol: str, qty: int, stop: float, target: float, ref_price: float,
+                       limit_price: float | None = None) -> OrderResult:
         with self._lock:
             if symbol in self._pos:
                 return OrderResult(False, None, None, "already holding this stock")
             fill = self._price(symbol) * (1 + SLIPPAGE)
+            if limit_price is not None and fill > limit_price:
+                return OrderResult(False, None, None, f"not filled: price {fill:.2f} is above the limit {limit_price:.2f}")
             if fill * qty > self.cash:
                 return OrderResult(False, None, None, "not enough cash")
             oid = str(uuid.uuid4())

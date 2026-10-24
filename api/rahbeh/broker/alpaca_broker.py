@@ -9,6 +9,7 @@ from alpaca.trading.enums import OrderClass, OrderSide, OrderStatus, OrderType, 
 from alpaca.trading.requests import (
     GetOrderByIdRequest,
     GetOrdersRequest,
+    LimitOrderRequest,
     MarketOrderRequest,
     ReplaceOrderRequest,
     StopLossRequest,
@@ -28,7 +29,8 @@ class AlpacaBroker:
 
     def account(self) -> Account:
         a = self.client.get_account()
-        return Account(float(a.equity), float(a.cash), float(a.buying_power), float(a.last_equity))
+        return Account(float(a.equity), float(a.cash), float(a.buying_power), float(a.last_equity),
+                       int(a.daytrade_count or 0), bool(a.pattern_day_trader))
 
     def positions(self) -> list[Position]:
         return [
@@ -36,23 +38,30 @@ class AlpacaBroker:
             for p in self.client.get_all_positions()
         ]
 
-    def submit_bracket(self, symbol: str, qty: int, stop: float, target: float, ref_price: float) -> OrderResult:
+    def submit_bracket(self, symbol: str, qty: int, stop: float, target: float, ref_price: float,
+                       limit_price: float | None = None) -> OrderResult:
+        common = dict(symbol=symbol, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.DAY, order_class=OrderClass.BRACKET,
+                      take_profit=TakeProfitRequest(limit_price=round(target, 2)), stop_loss=StopLossRequest(stop_price=round(stop, 2)))
         try:
-            order = self.client.submit_order(MarketOrderRequest(
-                symbol=symbol, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
-                order_class=OrderClass.BRACKET,
-                take_profit=TakeProfitRequest(limit_price=round(target, 2)),
-                stop_loss=StopLossRequest(stop_price=round(stop, 2)),
-            ))
+            req = (LimitOrderRequest(limit_price=round(limit_price, 2), **common) if limit_price is not None
+                   else MarketOrderRequest(**common))
+            order = self.client.submit_order(req)
         except Exception as e:
             return OrderResult(False, None, None, f"broker rejected: {e}")
         fill = None
-        for _ in range(10):  # market orders usually fill within a second or two
+        for _ in range(10):  # marketable orders usually fill within a second or two
             o = self.client.get_order_by_id(order.id)
             if o.status == OrderStatus.FILLED and o.filled_avg_price:
                 fill = float(o.filled_avg_price)
                 break
             time.sleep(0.5)
+        if fill is None and limit_price is not None:
+            # price ran away from the limit: don't chase, cancel the whole bracket
+            try:
+                self.client.cancel_order_by_id(order.id)
+            except Exception as e:
+                log.warning("cancel failed for %s: %s", symbol, e)
+            return OrderResult(False, str(order.id), None, f"not filled at or below the limit {limit_price:.2f}; order cancelled")
         return OrderResult(True, str(order.id), fill or ref_price, "filled" if fill else "submitted")
 
     def _stop_leg(self, order_id: str):

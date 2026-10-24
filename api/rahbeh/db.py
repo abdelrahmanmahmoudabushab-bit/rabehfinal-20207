@@ -64,6 +64,7 @@ class Proposal(Base):
     status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     agent_source: Mapped[str] = mapped_column(String(16), default="claude")  # claude | heuristic
     team: Mapped[dict] = mapped_column(JSON, default=dict)  # specialist reports: news, chart, company, mood
+    backtest: Mapped[dict] = mapped_column(JSON, default=dict)  # the 1,000+ variant test of this setup
 
 
 class Trade(Base):
@@ -89,6 +90,7 @@ class Trade(Base):
     origin: Mapped[str] = mapped_column(String(16), default="scanner")  # scanner | deal_finder | chart
     peak_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     keeper_log: Mapped[list] = mapped_column(JSON, default=list)  # Position keeper verdicts, newest last
+    plan: Mapped[dict] = mapped_column(JSON, default=dict)  # tested exit rules: max_hold_min, trail, expected_r, variant
 
 
 class DecisionLog(Base):
@@ -165,6 +167,37 @@ class StoredBar(Base):
     c: Mapped[float] = mapped_column(Float)
     v: Mapped[float] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(16))
+
+
+class Shadow(Base):
+    """Rules vs Claude A/B: both scored the same stock at the same moment; forward returns are filled in later."""
+
+    __tablename__ = "shadow_scores"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    price: Mapped[float] = mapped_column(Float)
+    threshold: Mapped[int] = mapped_column(Integer)
+    claude_score: Mapped[int] = mapped_column(Integer)
+    claude_go: Mapped[bool] = mapped_column(Boolean)
+    rules_score: Mapped[int] = mapped_column(Integer)
+    rules_go: Mapped[bool] = mapped_column(Boolean)
+    fwd_30: Mapped[float | None] = mapped_column(Float, nullable=True)  # % change 30 min later
+    fwd_60: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class HistBar(Base):
+    """Cached history for the backtester (our own copy, so any backtest can be replayed)."""
+
+    __tablename__ = "hist_bars"
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    tf: Mapped[str] = mapped_column(String(4), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    o: Mapped[float] = mapped_column(Float)
+    h: Mapped[float] = mapped_column(Float)
+    l: Mapped[float] = mapped_column(Float)  # noqa: E741
+    c: Mapped[float] = mapped_column(Float)
+    v: Mapped[float] = mapped_column(Float)
 
 
 class Briefing(Base):

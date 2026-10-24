@@ -32,6 +32,20 @@ call a skill only when you need something that is missing or want a fresher or d
 candle timeframe). Never invent data a skill could have told you."""
 
 
+# $ per million tokens (input, output, cache read) for cost tracking and the daily budget
+PRICES = {"claude-opus-5-5": (4.0, 20.0, 0.20), "claude-sonnet-5-5": (2.0, 10.0, 0.20), "claude-haiku-5-5": (0.10, 0.50, 0.01),
+          "claude-fable-5-1": (10.0, 50.0, 0.25)}
+
+
+def call_cost(model: str, input_tokens: int, output_tokens: int, cache_read: int = 0) -> float:
+    pin, pout, pcache = PRICES.get(model, PRICES["claude-opus-5-5"])
+    return (max(input_tokens - cache_read, 0) * pin + cache_read * pcache + output_tokens * pout) / 1e6
+
+
+class BudgetExceeded(RuntimeError):
+    pass
+
+
 def _block(b) -> dict:
     """Echo a response block back on the next turn, unchanged except for the SDK's local parse cache."""
     d = b.model_dump(mode="json", exclude_none=True)
@@ -172,6 +186,26 @@ class Agents:
         return "claude" if self.client else "heuristic"
 
     # ---- Claude plumbing ------------------------------------------------------------------
+    def spend_today(self) -> float:
+        """Estimated Claude spend since midnight New York time (cached for 30 s)."""
+        cached = getattr(self, "_spend_cache", None)
+        if cached and time.monotonic() - cached[0] < 30:
+            return cached[1]
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from sqlalchemy import select
+
+        start = datetime.now(ZoneInfo("America/New_York")).replace(hour=0, minute=0, second=0, microsecond=0)
+        with SessionLocal() as db:
+            calls = db.scalars(select(AgentCall).where(AgentCall.at >= start)).all()
+            total = sum(call_cost(c.model, c.input_tokens, c.output_tokens, c.cache_read_tokens) for c in calls)
+        self._spend_cache = (time.monotonic(), total)
+        return total
+
+    def over_budget(self) -> bool:
+        return self.s.daily_ai_budget_usd > 0 and self.spend_today() >= self.s.daily_ai_budget_usd
+
     def bind(self, engine) -> None:
         """Give the agents access to their skills (tools), which read data through the engine."""
         self.engine = engine
@@ -194,6 +228,8 @@ class Agents:
              role_text: str | None = None, effort: str | None = None):
         """One agent turn. The agent may call its own skills (tools) a few times before answering."""
         assert self.client is not None
+        if self.over_budget():
+            raise BudgetExceeded(f"daily AI budget of ${self.s.daily_ai_budget_usd:.2f} reached — using free rules until tomorrow")
         spec = BY_ID.get(agent)
         tools = [SKILLS[n].tool() for n in spec.skills] if spec and self.engine is not None else []
         messages: list[dict] = [{"role": "user", "content": content}]

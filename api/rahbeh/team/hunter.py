@@ -137,6 +137,7 @@ def _hunt(e: Engine, h: Hunt) -> None:
             h.step(label, rpt["summary"], sym, by=rpt["by"], skills_used=rpt.get("skills"),
                    ok=not (k == "company" and rpt.get("earnings_risk")))
         rep, src = e.agents.analyst(ctx)
+        e.record_shadow(sym, ctx, rep, src, threshold)
         h.step("analyst", f"Score {rep.score}/100 — {rep.thesis}", sym, by=src, skills_used=e.agents.last_trace(),
                ok=rep.direction == "long" and rep.score >= threshold)
         contexts[sym] = ctx
@@ -166,38 +167,52 @@ def _hunt(e: Engine, h: Hunt) -> None:
                skills_used=e.agents.last_trace(), ok=mg.decision == "trade" and mg.objection_answered)
         if mg.decision != "trade" or not mg.objection_answered:
             continue
+        btr = e.backtest_trade(sym)
+        ok_bt = e.backtest_ok(btr)
+        h.step("backtester", f"{'Edge confirmed' if btr.get('verdict') == 'edge' else 'No proven edge'}: {e.backtest_brief(btr)}."
+               + ("" if ok_bt else " " + "; ".join(btr.get("reasons", []))), sym, by="code",
+               skills_used=[{"skill": "run_backtest", "summary": f"{btr.get('variants_tested', 0):,} variants in {btr.get('ms', 0)} ms"}], ok=ok_bt)
+        if not ok_bt:
+            e._cooldown(sym)
+            continue
+        entry, stop, target, tuned = e.tuned_levels(mg, btr)
+        if tuned:
+            h.step("backtester", f"Using the tested exits: stop {stop:.2f}, target {target:.2f}"
+                   + (f", sell after {btr['tuned_plan']['max_hold_min']} min" if btr["tuned_plan"]["max_hold_min"] else ", hold until 15:50 at most")
+                   + f" (Manager had {mg.stop:.2f} / {mg.target:.2f}).", sym, ok=True)
         with SessionLocal() as db:
             u = e.settings_row(db)
             days = ctx["earnings"]["days_until"]
-            rd = risk.evaluate(risk.TradeRequest(sym, sector_of(sym), mg.entry, mg.stop, mg.target, days), e.risk_context(db, u), e.limits(u))
+            rd = risk.evaluate(risk.TradeRequest(sym, sector_of(sym), entry, stop, target, days), e.risk_context(db, u), e.limits(u))
             h.step("risk", "Allowed: up to " + f"{rd.qty} shares, risking ${rd.risk_amount:,.0f}" if rd.approved else f"Blocked: {rd.reason}",
                    sym, ok=rd.approved)
             if not rd.approved:
                 continue
             prop = Proposal(
-                symbol=sym, score=rep.score, entry=mg.entry, stop=mg.stop, target=mg.target, qty=rd.qty,
+                symbol=sym, score=rep.score, entry=entry, stop=stop, target=target, qty=rd.qty,
                 risk_amount=rd.risk_amount, thesis=rep.thesis, analyst=rep.model_dump(), devil=dv.model_dump(),
-                manager=mg.model_dump(), features={**ctx["features"], "headlines": ctx["laya"]["headlines"]},
+                manager={**mg.model_dump(), "tuned_by_backtest": tuned}, features={**ctx["features"], "headlines": ctx["laya"]["headlines"]},
                 risk_checks=rd.as_list(), status="idea" if mode == "research" else "pending",
-                status_reason="deal finder", agent_source=src, created_at=e.market.now(), team=ctx["team_reports"],
+                status_reason="deal finder", agent_source=src, created_at=e.market.now(), team=ctx["team_reports"], backtest=btr,
             )
             db.add(prop)
             db.flush()
             e.log(db, "deal_finder", "yes", f"best deal: {sym} (score {rep.score}), waiting for approval", sym)
             db.commit()
-            per_share = mg.entry - mg.stop
+            per_share = entry - stop
             h.proposal_id = prop.id
             h.deal = {
-                "symbol": sym, "name": c["name"], "score": rep.score, "thesis": rep.thesis, "entry": mg.entry, "stop": mg.stop,
-                "target": mg.target, "max_qty": rd.qty, "risk_per_share": round(per_share, 4),
-                "reward_per_share": round(mg.target - mg.entry, 4), "exit_plan": mg.exit_plan, "devil": dv.model_dump(),
+                "symbol": sym, "name": c["name"], "score": rep.score, "thesis": rep.thesis, "entry": entry, "stop": stop,
+                "target": target, "max_qty": rd.qty, "risk_per_share": round(per_share, 4),
+                "reward_per_share": round(target - entry, 4), "exit_plan": mg.exit_plan, "devil": dv.model_dump(), "backtest": btr,
+                "tuned_by_backtest": tuned, "manager_levels": {"entry": mg.entry, "stop": mg.stop, "target": mg.target},
                 "manager": mg.model_dump(), "team": ctx["team_reports"], "risk_checks": rd.as_list(), "mood": m.level,
                 "earnings": ctx["earnings"],
             }
             h.status, h.message = "found", f"Best deal: {sym}. Choose how many shares and approve to buy."
             h.step("manager", h.message, sym, ok=True)
             return
-    h.status, h.message = "no_deal", "The finalists did not survive the devil's advocate, manager and risk checks."
+    h.status, h.message = "no_deal", "The finalists did not survive the devil's advocate, manager, backtest and risk checks."
     h.step("risk", h.message, ok=False)
 
 

@@ -12,7 +12,9 @@ from sqlalchemy import func, select
 
 from .broker.base import Broker
 from .config import Settings
+from .backtest.service import Backtester
 from .db import (
+    Shadow,
     Alert, Briefing, DecisionLog, EquitySnapshot, Proposal, Review, SessionLocal, StoredBar, Trade, UserSettings,
 )
 from .market.base import MarketData
@@ -25,6 +27,7 @@ log = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 PROPOSAL_TTL = timedelta(minutes=15)
 ANALYSIS_CACHE_SECONDS = 120
+REVIEW_MIN_TRADES = 20
 PAUSE_AFTER_BAD_DATA = timedelta(minutes=15)
 DEMO_TIME_STOP = timedelta(minutes=120)  # the always-open demo has no 15:50 close, so trades time out instead
 
@@ -34,6 +37,7 @@ class Engine:
         self.s, self.market, self.broker, self.agents = s, market, broker, agents
         self.extras: Extras = extras or (SimExtras(market) if s.demo else LiveExtras(s))
         self.agents.bind(self)
+        self.backtester = Backtester(s, market.universe())
         self.hunts: dict = {}  # deal finder runs (team/hunter.py), kept in memory
         self.latest_hunt_id: str | None = None
         self._hunt_lock = threading.Lock()
@@ -48,6 +52,7 @@ class Engine:
         self.session_rules = not (s.demo and s.demo_always_open)
         self.cycle_lock = threading.Lock()
         self._analysis_cache: dict[str, tuple[float, tuple]] = {}
+        self.cooldowns: dict[str, tuple[datetime, int]] = {}  # symbol -> (until, headline count when rejected)
 
     # ---- helpers ---------------------------------------------------------------------------
     def settings_row(self, db) -> UserSettings:
@@ -81,16 +86,30 @@ class Engine:
             except Exception as e:
                 log.warning("telegram failed: %s", e)
 
+    def daytrades_5d(self, db) -> int:
+        """Round trips opened and closed on the same day over the last 5 business days."""
+        since = self.market.now() - timedelta(days=7)
+        rows = db.scalars(select(Trade).where(Trade.opened_at >= since, Trade.closed_at.is_not(None))).all()
+        n = 0
+        for t in rows:
+            o = (t.opened_at if t.opened_at.tzinfo else t.opened_at.replace(tzinfo=UTC)).astimezone(ET).date()
+            c = (t.closed_at if t.closed_at.tzinfo else t.closed_at.replace(tzinfo=UTC)).astimezone(ET).date()
+            n += o == c and t.exit_reason != "demo restart"
+        return n
+
     def risk_context(self, db, u: UserSettings) -> risk.RiskContext:
         positions = self.broker.positions()
         n_today = db.scalar(select(func.count(Trade.id)).where(Trade.opened_at >= self._day_start_utc())) or 0
+        acct = self.broker.account()
         return risk.RiskContext(
-            account=self.broker.account(), positions=positions,
+            account=acct, positions=positions,
             sector_of={p.symbol: sector_of(p.symbol) for p in positions},
             realized_pnl_today=0.0, trades_today=n_today, kill_switch=u.kill_switch,
             now=self.market.now(), session_rules=self.session_rules,
             mood_level=self.mood.level if self.mood else "calm",
             mood_multiplier=self.mood.risk_multiplier if self.mood else 1.0,
+            daytrades_5d=max(acct.daytrade_count, self.daytrades_5d(db)),
+            swing=u.strategy == "swing",
         )
 
     def earnings_ctx(self, symbol: str) -> dict:
@@ -178,6 +197,7 @@ class Engine:
         self.update_mood()
         self.manage_positions()
         self.run_keepers()
+        self.fill_shadows()
         summary = self.scan() if self.market.is_open() else {"skipped": "market closed"}
         self.snapshot()
         self.last_cycle = datetime.now(UTC)
@@ -248,6 +268,9 @@ class Engine:
                         summary["halal_no"] += 1
                         self.log(db, "halal", "no", "; ".join(hr.reasons), sym)
                         continue
+                if self._cooling(sym):
+                    summary["cooling"] = summary.get("cooling", 0) + 1
+                    continue
                 candidates.append((lr.score, sym))
 
             if laya_no:
@@ -275,7 +298,9 @@ class Engine:
         team["mood"] = {**self.mood_report, "level": self.mood.level if self.mood else "calm"}
         ctx["team_reports"] = team
         rep, src = self.agents.analyst(ctx)
+        self.record_shadow(sym, ctx, rep, src, u.score_threshold)
         if rep.direction != "long" or rep.score < u.score_threshold:
+            self._cooldown(sym)
             self.log(db, "score", "no", f"score {rep.score} below line {u.score_threshold}" if rep.direction == "long"
                      else f"analyst says skip (score {rep.score}): {rep.thesis}", sym, {"analyst": rep.model_dump(), "team": team})
             return False
@@ -283,21 +308,31 @@ class Engine:
         dv, _ = self.agents.devil(ctx, rep)
         mg, _ = self.agents.manager(ctx, rep, dv)
         if not mg.objection_answered or mg.decision != "trade":
+            self._cooldown(sym)
             self.log(db, "devils_advocate", "no", f"objection not answered: {dv.objection}", sym,
                      {"devil": dv.model_dump(), "manager": mg.model_dump()})
             return False
-        # 7. Risk engine: within limits?
-        req = risk.TradeRequest(sym, sector_of(sym), mg.entry, mg.stop, mg.target, ctx["earnings"]["days_until"])
+        # 7. Backtester: has this setup made money on history, out of sample?
+        btr = self.backtest_trade(sym)
+        if not self.backtest_ok(btr):
+            self._cooldown(sym)
+            self.log(db, "backtest", "no", f"no proven edge — {self.backtest_brief(btr)}. " + "; ".join(btr.get("reasons", [])), sym,
+                     {"verdict": btr.get("verdict"), "setup": btr.get("setup"), "variants": btr.get("variants_tested")})
+            return False
+        entry, stop, target, tuned = self.tuned_levels(mg, btr)
+        # 8. Risk engine: within limits?
+        req = risk.TradeRequest(sym, sector_of(sym), entry, stop, target, ctx["earnings"]["days_until"])
         rd = risk.evaluate(req, self.risk_context(db, u), self.limits(u))
         prop = Proposal(
-            symbol=sym, score=rep.score, entry=mg.entry, stop=mg.stop, target=mg.target, qty=rd.qty,
+            symbol=sym, score=rep.score, entry=entry, stop=stop, target=target, qty=rd.qty,
             risk_amount=rd.risk_amount, thesis=rep.thesis, analyst=rep.model_dump(), devil=dv.model_dump(),
-            manager=mg.model_dump(), features={**ctx["features"], "headlines": ctx["laya"]["headlines"]},
-            risk_checks=rd.as_list(), status="blocked", agent_source=src, created_at=self.market.now(), team=team,
+            manager={**mg.model_dump(), "tuned_by_backtest": tuned}, features={**ctx["features"], "headlines": ctx["laya"]["headlines"]},
+            risk_checks=rd.as_list(), status="blocked", agent_source=src, created_at=self.market.now(), team=team, backtest=btr,
         )
         db.add(prop)
         if not rd.approved:
             prop.status_reason = rd.reason
+            self._cooldown(sym)
             self.log(db, "risk", "no", rd.reason, sym, {"checks": rd.as_list()})
             return False
         db.flush()
@@ -340,7 +375,9 @@ class Engine:
                 mg, _ = self.agents.manager(ctx, rep, dv)
                 self._analysis_cache[sym] = (time.monotonic(), (rep, dv, mg, src, team))
             days = ctx["earnings"]["days_until"]
-            rd = risk.evaluate(risk.TradeRequest(sym, sector_of(sym), mg.entry, mg.stop, mg.target, days), self.risk_context(db, u), self.limits(u))
+            btr = self.backtest_trade(sym)
+            entry, stop, target, tuned = self.tuned_levels(mg, btr)
+            rd = risk.evaluate(risk.TradeRequest(sym, sector_of(sym), entry, stop, target, days), self.risk_context(db, u), self.limits(u))
             gates = [
                 {"name": "Data OK", "passed": dc.ok, "detail": "; ".join(dc.problems) or "clean"},
                 {"name": "Halal", "passed": hr.passes or not u.halal_only,
@@ -352,17 +389,18 @@ class Engine:
                  "detail": f"{self.mood.level}: {'; '.join(self.mood.reasons)}" if self.mood else "not assessed yet"},
                 {"name": "Earnings", "passed": days is None or not 0 <= days <= risk.EARNINGS_BLACKOUT_DAYS,
                  "detail": f"next report in {days} day(s)" if days is not None else "date unknown"},
+                {"name": "Backtest", "passed": self.backtest_ok(btr), "detail": f"{btr.get('verdict')}: {self.backtest_brief(btr)}"},
                 {"name": "Risk engine", "passed": rd.approved, "detail": rd.reason},
             ]
             verdict = all(g["passed"] for g in gates)
             proposal_id = None
             if propose and verdict:
                 prop = Proposal(
-                    symbol=sym, score=rep.score, entry=mg.entry, stop=mg.stop, target=mg.target, qty=rd.qty,
+                    symbol=sym, score=rep.score, entry=entry, stop=stop, target=target, qty=rd.qty,
                     risk_amount=rd.risk_amount, thesis=rep.thesis, analyst=rep.model_dump(), devil=dv.model_dump(),
-                    manager=mg.model_dump(), features={**ctx["features"], "headlines": ctx["laya"]["headlines"]},
+                    manager={**mg.model_dump(), "tuned_by_backtest": tuned}, features={**ctx["features"], "headlines": ctx["laya"]["headlines"]},
                     risk_checks=rd.as_list(), status="idea" if u.mode == "research" else "pending",
-                    status_reason="requested from chart", agent_source=src, created_at=now, team=team,
+                    status_reason="requested from chart", agent_source=src, created_at=now, team=team, backtest=btr,
                 )
                 db.add(prop)
                 db.flush()
@@ -372,7 +410,8 @@ class Engine:
         return {
             "symbol": sym, "source": src, "verdict": "trade" if verdict else "no trade", "gates": gates,
             "analyst": rep.model_dump(), "devil": dv.model_dump(), "manager": mg.model_dump(),
-            "plan": {"entry": mg.entry, "stop": mg.stop, "target": mg.target, "qty": rd.qty, "risk_amount": rd.risk_amount},
+            "plan": {"entry": entry, "stop": stop, "target": target, "qty": rd.qty, "risk_amount": rd.risk_amount, "tuned_by_backtest": tuned},
+            "backtest": btr,
             "risk_checks": rd.as_list(), "proposal_id": proposal_id, "team": team,
         }
 
@@ -382,6 +421,80 @@ class Engine:
             created = p.created_at if p.created_at.tzinfo else p.created_at.replace(tzinfo=UTC)
             if created < cutoff:
                 p.status, p.status_reason = "expired", "price may have moved; proposals last 15 minutes"
+
+    def _headline_count(self, symbol: str) -> int:
+        return sum(1 for n in self.market.news([symbol], 50) if symbol in n.symbols)
+
+    def _cooldown(self, symbol: str) -> None:
+        """After the agents say no, don't pay to ask them again for a while — unless new news arrives."""
+        self.cooldowns[symbol] = (self.market.now() + timedelta(minutes=self.s.agent_cooldown_minutes), self._headline_count(symbol))
+
+    def _cooling(self, symbol: str) -> bool:
+        hit = self.cooldowns.get(symbol)
+        if not hit:
+            return False
+        until, seen = hit
+        if self.market.now() >= until or self._headline_count(symbol) > seen:
+            self.cooldowns.pop(symbol, None)
+            return False
+        return True
+
+    def backtest_trade(self, symbol: str) -> dict:
+        """Backtester agent: test this setup 1,000+ ways on history before the trade can go further."""
+        try:
+            return self.backtester.for_trade(symbol, self.market.minute_bars(symbol, 400))
+        except Exception as e:
+            log.exception("backtest failed for %s", symbol)
+            return {"verdict": "error", "reasons": [f"backtest failed: {e}"], "variants_tested": 0}
+
+    def backtest_ok(self, btr: dict) -> bool:
+        return not self.s.backtest_gate or btr.get("verdict") == "edge"
+
+    def tuned_levels(self, mg, btr: dict) -> tuple[float, float, float, bool]:
+        """Entry, stop, target: the tested variant's exits when they proved an edge, otherwise the Manager's."""
+        tp = btr.get("tuned_plan")
+        if self.s.backtest_adopt_exits and btr.get("verdict") == "edge" and tp and tp["stop"] < tp["entry"] < tp["target"]:
+            return tp["entry"], tp["stop"], tp["target"], True
+        return mg.entry, mg.stop, mg.target, False
+
+    @staticmethod
+    def backtest_brief(btr: dict) -> str:
+        best = btr.get("best") or {}
+        o = best.get("oos") or {}
+        if not best:
+            return "; ".join(btr.get("reasons", [])) or btr.get("verdict", "")
+        return (f"{btr.get('variants_tested', 0):,} variants of {btr.get('setup')} on {len(btr.get('basket', []))} stocks; "
+                f"best out of sample {o.get('exp_r', 0):+.2f}R over {int(o.get('n', 0))} trades, win {o.get('win', 0):.0%}")
+
+    # ---- rules vs Claude A/B ------------------------------------------------------------------
+    def record_shadow(self, symbol: str, ctx: dict, rep, src: str, threshold: int) -> None:
+        """When Claude scores a stock, also score it with the free rules and remember both. Forward returns are
+        filled in later, so we can measure whether Claude's extra cost buys better picks."""
+        if src != "claude":
+            return
+        from .pipeline.agents import _heuristic_analyst
+
+        rules = _heuristic_analyst(ctx)
+        with SessionLocal() as db:
+            db.add(Shadow(at=self.market.now(), symbol=symbol, price=ctx["features"]["price"], threshold=threshold,
+                          claude_score=rep.score, claude_go=rep.direction == "long" and rep.score >= threshold,
+                          rules_score=rules.score, rules_go=rules.direction == "long" and rules.score >= threshold))
+            db.commit()
+
+    def fill_shadows(self) -> None:
+        now = self.market.now()
+        with SessionLocal() as db:
+            rows = db.scalars(select(Shadow).where(Shadow.fwd_60.is_(None)).limit(200)).all()
+            for r in rows:
+                at = r.at if r.at.tzinfo else r.at.replace(tzinfo=UTC)
+                q = self.market.quote(r.symbol)
+                if not q:
+                    continue
+                if r.fwd_30 is None and now - at >= timedelta(minutes=30):
+                    r.fwd_30 = round((q.price / r.price - 1) * 100, 4)
+                if now - at >= timedelta(minutes=60):
+                    r.fwd_60 = round((q.price / r.price - 1) * 100, 4)
+            db.commit()
 
     def _latest_lessons_safe(self) -> list[str]:
         with SessionLocal() as db:
@@ -422,7 +535,8 @@ class Engine:
             size = qty if qty is not None else rd.qty
             if size < 1:
                 return False, "quantity must be at least 1"
-            res = self.broker.submit_bracket(prop.symbol, size, stop, target, entry)
+            limit = round(entry * (1 + self.s.max_entry_slip_bps / 10_000), 2)  # never chase more than this
+            res = self.broker.submit_bracket(prop.symbol, size, stop, target, entry, limit_price=limit)
             if not res.ok:
                 prop.status, prop.status_reason = "blocked", res.message
                 self.log(db, "broker", "no", res.message, prop.symbol)
@@ -434,6 +548,7 @@ class Engine:
                 proposal_id=prop.id, symbol=prop.symbol, sector=sector_of(prop.symbol), qty=size, entry_price=fill,
                 initial_stop=stop, stop=stop, target=target, broker_order_id=res.order_id, mode=u.mode,
                 opened_at=self.market.now(), notes=[], origin=origin, peak_price=fill, keeper_log=[],
+                plan=_trade_plan(prop),
             ))
             self.log(db, "execution", "yes", f"bought {size} @ {fill:.2f}", prop.symbol)
             self.alert(db, "info", f"Bought {size} {prop.symbol} @ {fill:.2f}", f"Stop {stop:.2f} · Target {target:.2f}\n{prop.thesis}")
@@ -475,16 +590,21 @@ class Engine:
 
     def manage_positions(self) -> None:
         with self.lock, SessionLocal() as db:
+            swing = self.settings_row(db).strategy == "swing"
             trades = self.open_trades(db)
             by_sym = {t.symbol: t for t in trades}
             for sym, px, reason in self.broker.sync_exits({t.symbol: t.broker_order_id for t in trades}):
                 if t := by_sym.pop(sym, None):
                     self._close_trade(db, t, px, reason)
             now = self.market.now()
-            flatten = risk.should_flatten(now, self.session_rules)
+            flatten = risk.should_flatten(now, self.session_rules) and not swing
             for t in by_sym.values():
                 opened = t.opened_at if t.opened_at.tzinfo else t.opened_at.replace(tzinfo=UTC)
-                why = "15:50 close" if flatten else "time stop" if (not self.session_rules and now - opened > DEMO_TIME_STOP) else None
+                plan = t.plan or {}
+                held_min = (now - opened).total_seconds() / 60
+                why = ("15:50 close" if flatten
+                       else "tested time stop" if plan.get("max_hold_min") and held_min >= plan["max_hold_min"]
+                       else "time stop" if (not swing and not self.session_rules and now - opened > DEMO_TIME_STOP) else None)
                 if why:
                     res = self.broker.close(t.symbol)
                     if res.ok:
@@ -497,7 +617,8 @@ class Engine:
                 if not q:
                     continue
                 t.peak_price = max(t.peak_price or t.entry_price, q.price)
-                new_stop = risk.trail_stop(t.entry_price, t.initial_stop, t.stop, q.price)
+                new_stop = (t.stop if plan.get("trail") == "none"  # the tested variant had no trail: keep it as tested
+                            else risk.trail_stop(t.entry_price, t.initial_stop, t.stop, q.price))
                 if new_stop > t.stop and self.broker.update_stop(t.symbol, t.broker_order_id, new_stop):
                     t.notes = [*t.notes, {"at": now.isoformat(), "note": f"stop raised {t.stop:.2f} → {new_stop:.2f}"}]
                     t.stop = new_stop
@@ -652,13 +773,18 @@ class Engine:
             applied, verdict = False, "no change suggested"
             if rep.suggested_score_threshold != u.score_threshold:
                 new_thr = max(50, min(90, rep.suggested_score_threshold))
-                scored = [(score_by_prop.get(t.proposal_id) or 0, t.pnl) for t in closed]
+                # judge rule changes on the last 10 trading days, not one day (one day is mostly noise)
+                window_start = start - timedelta(days=14)
+                window = db.scalars(select(Trade).where(Trade.opened_at >= window_start, Trade.opened_at < end,
+                                                        Trade.pnl.is_not(None), Trade.exit_reason != "demo restart")).all()
+                wprops = {p.id: p.score for p in db.scalars(select(Proposal).where(Proposal.id.in_([t.proposal_id for t in window if t.proposal_id]))).all()}
+                scored = [(wprops.get(t.proposal_id) or 0, t.pnl) for t in window]
                 live_pnl = sum(p for _, p in scored)
                 new_pnl = sum(p for s, p in scored if s >= new_thr)
                 if new_thr < u.score_threshold:
                     verdict = "lower threshold can't be tested on today's data (those trades were never taken) — kept live version"
-                elif len(scored) < 3:
-                    verdict = f"only {len(scored)} trades — too few to prove the change, kept live version"
+                elif len(scored) < REVIEW_MIN_TRADES:
+                    verdict = f"only {len(scored)} trades in the last 10 trading days (need {REVIEW_MIN_TRADES}) — too few to prove the change, kept live version"
                 elif new_pnl > live_pnl:
                     applied = True
                     verdict = f"replay: threshold {new_thr} → P&L {new_pnl:+,.2f} vs live {live_pnl:+,.2f}; change applied"
@@ -714,3 +840,13 @@ class Engine:
                                                  "devils_advocate": p.devil, "manager": p.manager, "risk_checks": p.risk_checks,
                                                  "status": p.status, "status_reason": p.status_reason}
         return self.agents.ask(question, payload, language)
+
+
+def _trade_plan(prop: Proposal) -> dict:
+    """The exit rules the backtest validated, so the live trade is managed the way it was tested."""
+    btr, mgr = prop.backtest or {}, prop.manager or {}
+    tp = btr.get("tuned_plan")
+    if not (tp and mgr.get("tuned_by_backtest")):
+        return {"expected_r": (btr.get("best") or {}).get("oos", {}).get("exp_r")} if btr else {}
+    return {"max_hold_min": tp["max_hold_min"], "trail": tp["trail"], "expected_r": tp["expected_r"],
+            "variant": tp["variant"], "setup": btr.get("setup")}

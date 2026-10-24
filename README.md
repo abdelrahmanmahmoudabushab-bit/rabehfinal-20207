@@ -46,6 +46,41 @@ The **Agents** page in the app shows each source's live status. Each source is o
 
 These are not wired yet: short interest, unusual options activity, earnings call transcripts, and Gulf/Egypt prices with Arabic news. Each needs a paid or regional data vendor.
 
+## Backtesting: every trade is proven first
+
+**Every trade the AI finds is backtested before it can reach you.** The Backtester (`api/rahbeh/backtest/`) works in these steps:
+
+1. It works out which setup is firing: breakout, VWAP pullback, momentum, or opening-range breakout.
+2. It tests that setup on the stock and 7 peers over 60 days of 5-minute history, **1,152 ways**: 9 filters (relative volume × RSI cap) × 128 exit rules (stop size × target × breakeven trail × max hold).
+3. It picks the best variant using only the first 70% of history.
+4. It judges that variant only on the last 30%, which it never saw.
+5. It resamples the result **1,000 times** (Monte Carlo) to estimate the chance of a losing run.
+
+A trade is blocked when there's no proven out-of-sample edge (`BACKTEST_GATE`). When there is one, the trade uses the tested stop, target and holding time instead of the Manager's guess (`BACKTEST_ADOPT_EXITS`).
+
+**The Strategy lab page** runs all 4,608 variants across the whole watchlist, in about 5 seconds on 28 stocks × 60 days.
+
+**Honesty rules**, all covered by tests (`tests/test_backtest.py`):
+- Trades enter at the next bar's open, so there's no lookahead.
+- Slippage is charged on entry and exit.
+- If the stop and target fall in the same bar, the stop is assumed to hit first.
+- Gaps through the stop fill at the worse open price.
+- Everything is flat by 15:50 ET.
+- On pure random-walk data the tool finds **no** edge.
+- On data with a planted edge it finds it.
+
+**Demo caveat:** demo backtests run on simulated history, whose news bursts persist for several bars. That gives momentum setups an edge that real markets mostly don't have. Only backtests on real Alpaca history mean anything.
+
+## Cost and execution controls
+
+- **Cooldown:** a stock the agents rejected isn't re-analyzed (and re-billed) for 30 minutes unless new news lands.
+- **Daily AI budget:** past it, agents use free rules until tomorrow. The Reviewer page shows cost per trade.
+- **Rules vs Claude A/B:** every Claude analyst score is shadowed by the free rules, and both are checked 60 minutes later.
+- **Reviewer:** changes a rule only with 20+ trades over the last 10 trading days.
+- **Live vs backtest:** realized R per trade is compared with what the backtest promised.
+- **Entries:** limit orders, so the app never pays more than `MAX_ENTRY_SLIP_BPS` above plan. Unfilled orders are cancelled.
+- **US pattern-day-trader rule:** enforced for accounts under $25k. Swing mode holds overnight instead.
+
 ## Deal finder (full loop on one page)
 
 The **Deal finder** page runs the whole trade in four steps:

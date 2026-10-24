@@ -81,6 +81,7 @@ export interface Trade {
   origin?: string;
   peak_price?: number | null;
   keeper_log?: KeeperEntry[];
+  plan?: { max_hold_min?: number | null; trail?: string; expected_r?: number; variant?: string; setup?: string };
 }
 
 export interface SkillUse {
@@ -136,6 +137,9 @@ export interface Hunt {
     team: TeamReports;
     risk_checks: RiskCheck[];
     mood: string;
+    backtest?: Backtest;
+    tuned_by_backtest?: boolean;
+    manager_levels?: { entry: number; stop: number; target: number };
   } | null;
   proposal_id: number | null;
   trade_id: number | null;
@@ -223,6 +227,7 @@ export interface Proposal {
   status_reason: string | null;
   agent_source: "claude" | "heuristic";
   team: TeamReports;
+  backtest?: Backtest;
   trade?: Trade | null;
 }
 
@@ -410,6 +415,11 @@ export interface Review {
 }
 
 export interface Usage {
+  trades_24h: number;
+  cost_per_trade: number | null;
+  budget_usd: number;
+  spend_today: number;
+  over_budget: boolean;
   calls_24h: number;
   errors_24h: number;
   input_tokens_24h: number;
@@ -431,6 +441,7 @@ export interface Analysis {
   risk_checks: RiskCheck[];
   proposal_id: number | null;
   team: TeamReports;
+  backtest?: Backtest;
 }
 
 export interface CandlesResponse {
@@ -439,4 +450,81 @@ export interface CandlesResponse {
   bars: { time: number; open: number; high: number; low: number; close: number; volume: number }[];
   trades: Trade[];
   last: number;
+}
+
+export interface BtStats {
+  n: number;
+  win: number;
+  exp_r: number;
+  pf: number;
+  mdd_r: number;
+  t: number;
+  avg_pct: number;
+}
+
+export interface BtRow {
+  key: string;
+  variant: { setup: string; min_rvol: number; rsi_cap: number; stop_atr: number; target_r: number; trail: string; max_hold: number };
+  applicable: boolean;
+  is: BtStats;
+  oos: BtStats;
+}
+
+export interface Backtest {
+  verdict: "edge" | "no_edge" | "not_enough_data" | "error";
+  reasons: string[];
+  variants_tested: number;
+  symbols?: string[];
+  setups?: string[];
+  bars?: number;
+  days?: number;
+  signals?: number;
+  split_at?: number;
+  slip_bps?: number;
+  best?: BtRow | null;
+  leaderboard?: BtRow[];
+  share_oos_positive?: number;
+  median_oos_exp_r?: number;
+  is_oos_rank_corr?: number;
+  heatmap?: { stops: number[]; targets: number[]; cells: number[][] };
+  setup_summary?: { setup: string; signals: number; description: string; share_oos_positive: number; best_oos_exp_r: number }[];
+  equity?: { t: number; cum_r: number; oos: boolean }[];
+  monte_carlo?: { runs: number; p_loss?: number; median_total_r?: number; p5_total_r?: number; p95_total_r?: number; median_mdd_r?: number; p95_mdd_r?: number; hist?: number[]; hist_edges?: number[] };
+  setup?: string;
+  setup_description?: string;
+  live?: { rvol: number; rsi: number; atr: number; price: number };
+  note?: string | null;
+  basket?: string[];
+  ms?: number;
+  source?: string;
+  tuned_plan?: { entry: number; stop: number; target: number; max_hold_min: number | null; trail: string; expected_r: number; variant: string };
+}
+
+export interface LabJob {
+  id: string;
+  status: "running" | "done" | "failed";
+  started_at: string;
+  finished_at?: string;
+  progress: string;
+  symbols: string[];
+  setups: string[];
+  days: number;
+  result?: Backtest;
+  error?: string;
+}
+
+export interface AbResult {
+  samples: number;
+  pending: number;
+  min_samples: number;
+  agreement: number | null;
+  note: string;
+  claude: { go: number; no: number; avg_fwd60_go: number | null; avg_fwd60_no: number | null; hit_rate_go: number | null; edge: number | null };
+  rules: { go: number; no: number; avg_fwd60_go: number | null; avg_fwd60_no: number | null; hit_rate_go: number | null; edge: number | null };
+}
+
+export interface LiveVsBacktest {
+  overall: { trades: number; expected_r?: number; realized_r?: number };
+  by_setup: Record<string, { trades: number; expected_r: number; realized_r: number }>;
+  untested_trades: number;
 }

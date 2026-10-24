@@ -168,6 +168,16 @@ def risk_check(e: Engine, symbol: str, entry: float, stop: float, target: float)
     return {"approved": rd.approved, "max_qty": rd.qty, "risk_amount": rd.risk_amount, "failed": [c.detail for c in rd.failed]}
 
 
+def run_backtest(e: Engine, symbol: str) -> dict:
+    """Test the setup firing on this stock right now 1,000+ ways on history (out-of-sample)."""
+    r = e.backtest_trade(symbol)
+    best = r.get("best") or {}
+    return {"symbol": symbol, "verdict": r.get("verdict"), "setup": r.get("setup"), "variants_tested": r.get("variants_tested"),
+            "best_variant": best.get("key"), "in_sample": best.get("is"), "out_of_sample": best.get("oos"),
+            "share_of_variants_profitable_oos": r.get("share_oos_positive"), "monte_carlo_p_loss": (r.get("monte_carlo") or {}).get("p_loss"),
+            "tuned_plan": r.get("tuned_plan"), "reasons": r.get("reasons")}
+
+
 def get_recent_trades(e: Engine, limit: int = 20) -> dict:
     from ..db import SessionLocal, Trade
     from sqlalchemy import select
@@ -208,6 +218,8 @@ SKILLS: dict[str, Skill] = {s.name: s for s in [
     Skill("get_position", "Our open position in a stock: size, entry, stop, target, P&L in R", ["Rahbeh database", "Alpaca broker"], SYM, ["symbol"], get_position),
     Skill("risk_check", "Dry-run the risk engine on a plan: allowed or not, and the maximum size", ["Rahbeh risk engine"],
           {**SYM, "entry": {"type": "number"}, "stop": {"type": "number"}, "target": {"type": "number"}}, ["symbol", "entry", "stop", "target"], risk_check),
+    Skill("run_backtest", "Backtest the setup firing on a stock right now, 1,000+ ways, judged out of sample with Monte Carlo",
+          ["Alpaca market data", "Rahbeh backtester"], SYM, ["symbol"], run_backtest),
     Skill("get_recent_trades", "Recently closed trades with result and R multiple", ["Rahbeh database"],
           {"limit": {"type": "integer"}}, [], get_recent_trades),
     Skill("get_decision_log", "Recent decisions and every 'no' with its reason", ["Rahbeh database"],

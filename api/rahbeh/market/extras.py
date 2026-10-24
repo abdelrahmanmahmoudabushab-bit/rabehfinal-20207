@@ -317,7 +317,9 @@ class LiveExtras:
     def sources(self) -> list[dict]:
         s = self.s
         return [
-            _src("Alpaca market data", "Live prices, minute bars, chart candles", "connected" if s.alpaca_api_key else "missing_key", "ALPACA_API_KEY"),
+            _src("Alpaca market data", "Live prices, minute bars, chart candles, backtest history", "connected" if s.alpaca_api_key else "missing_key",
+                 "ALPACA_DATA_FEED", "IEX feed: only a small slice of US volume — set ALPACA_DATA_FEED=sip (paid) for intraday trading"
+                 if s.alpaca_data_feed.lower() != "sip" else "SIP: full-market prices"),
             _src("Alpaca news", "Headlines with publish times", "connected" if s.alpaca_api_key else "missing_key", "ALPACA_API_KEY"),
             _src("Alpaca broker", "Bracket orders, positions, account", "connected" if s.alpaca_api_key else "missing_key", "ALPACA_API_KEY",
                  "paper account" if s.alpaca_paper else "LIVE MONEY"),

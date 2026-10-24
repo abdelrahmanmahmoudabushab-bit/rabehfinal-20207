@@ -11,6 +11,7 @@ import { Separator } from "@/components/ui/misc";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RangeBar, ScoreRing } from "@/components/app/bits";
+import { BacktestBadge, BacktestPanel } from "@/components/app/backtest-panel";
 import { TeamReportsView } from "@/components/app/team";
 import { useAi } from "@/lib/ai";
 import { api, refreshAll, type Proposal } from "@/lib/api";
@@ -93,6 +94,7 @@ export function ProposalCard({ p }: { p: Proposal }) {
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-lg font-semibold tracking-tight">{p.symbol}</span>
               <Badge variant={STATUS_VARIANT[p.status]}>{p.status === "pending" ? t("pendingApproval") : p.status}</Badge>
+              <BacktestBadge bt={p.backtest} />
               {p.agent_source === "heuristic" && (
                 <Badge variant="muted" className="gap-1">
                   <Bot /> heuristic
@@ -167,6 +169,7 @@ export function ProposalSheet({ p, open, onOpenChange }: { p: Proposal; open: bo
           <TabsList className="w-full">
             <TabsTrigger value="thesis">{t("thesis")}</TabsTrigger>
             <TabsTrigger value="team">Team</TabsTrigger>
+            <TabsTrigger value="backtest">Backtest</TabsTrigger>
             <TabsTrigger value="debate">{t("debate")}</TabsTrigger>
             <TabsTrigger value="safety">{t("safety")}</TabsTrigger>
           </TabsList>
@@ -230,6 +233,14 @@ export function ProposalSheet({ p, open, onOpenChange }: { p: Proposal; open: bo
           <TabsContent value="team" className="pt-1">
             <p className="text-muted-foreground pt-2 text-xs">What each specialist reported before the Analyst made its call.</p>
             <TeamReportsView team={p.team ?? {}} />
+          </TabsContent>
+
+          <TabsContent value="backtest" className="pt-3">
+            {p.backtest?.verdict ? (
+              <BacktestPanel bt={p.backtest} />
+            ) : (
+              <p className="text-muted-foreground text-xs">This idea was made before every trade was backtested.</p>
+            )}
           </TabsContent>
 
           <TabsContent value="debate" className="space-y-4 pt-3">

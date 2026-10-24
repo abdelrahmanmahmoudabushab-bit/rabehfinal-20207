@@ -10,6 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Skeleton, Slider } from "@/components/ui/misc";
 import { PageHeader, ScoreRing } from "@/components/app/bits";
+import { BacktestPanel } from "@/components/app/backtest-panel";
 import { TeamReportsView } from "@/components/app/team";
 import { TvChart } from "@/components/app/tv-chart";
 import { api, refreshAll, useApi, type CandlesResponse, type Hunt, type HuntStep, type KeeperEntry, type Trade } from "@/lib/api";
@@ -29,6 +30,7 @@ const AGENT_LABEL: Record<string, string> = {
   risk: "Risk engine",
   broker: "Order placer",
   keeper: "Position keeper",
+  backtester: "Backtester",
   system: "System",
 };
 
@@ -214,6 +216,17 @@ function DealCard({ hunt, onBought }: { hunt: Hunt; onBought: () => void }) {
             </div>
           ))}
         </div>
+
+        {d.backtest && (
+          <details open className="border px-3">
+            <summary className="cursor-pointer py-2 text-sm font-medium">
+              Backtest — this setup tested {d.backtest.variants_tested.toLocaleString()} ways{d.tuned_by_backtest ? " · exits tuned to the tested variant" : ""}
+            </summary>
+            <div className="pb-3">
+              <BacktestPanel bt={d.backtest} managerLevels={d.tuned_by_backtest ? d.manager_levels : undefined} />
+            </div>
+          </details>
+        )}
 
         <div className="space-y-3 border p-4">
           <div className="flex items-baseline justify-between">

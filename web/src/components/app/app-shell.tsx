@@ -21,6 +21,7 @@ import { cn } from "@/lib/utils";
 const NAV: { href: string; key: Key }[] = [
   { href: "/", key: "chart" },
   { href: "/deals", key: "deals" },
+  { href: "/lab", key: "lab" },
   { href: "/portfolio", key: "portfolio" },
   { href: "/agents", key: "agents" },
   { href: "/ideas", key: "ideas" },
@@ -56,7 +57,7 @@ function NavLinks({ vertical, pending, onNavigate }: { vertical?: boolean; pendi
             href={href}
             onClick={onNavigate}
             className={cn(
-              "relative flex items-center gap-1.5 rounded-sm px-2.5 py-1.5 text-[13px] font-medium transition-colors",
+              "relative flex items-center gap-1.5 rounded-sm px-2.5 py-1.5 text-[13px] font-medium whitespace-nowrap transition-colors",
               active ? "text-foreground" : "text-muted-foreground hover:text-foreground hover:bg-accent",
               active && !vertical && "after:bg-foreground after:absolute after:inset-x-2.5 after:-bottom-[9px] after:h-0.5",
               active && vertical && "bg-accent",
@@ -99,11 +100,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-dvh flex-col">
       <header className="bg-background sticky top-0 z-40 flex h-12 shrink-0 items-center gap-3 border-b px-3">
-        <Button variant="ghost" size="icon-sm" className="lg:hidden" onClick={() => setOpen(true)} aria-label="Menu">
+        <Button variant="ghost" size="icon-sm" className="xl:hidden" onClick={() => setOpen(true)} aria-label="Menu">
           <Menu />
         </Button>
         <Logo />
-        <div className="ms-3 hidden lg:block">
+        <div className="ms-3 hidden xl:block">
           <NavLinks pending={pending} />
         </div>
 

@@ -13,11 +13,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from .config import get_settings
-from .db import AgentCall, Alert, DecisionLog, EquitySnapshot, Proposal, Review, SessionLocal, Trade, UserSettings, init_db
+from .db import AgentCall, Alert, Shadow, DecisionLog, EquitySnapshot, Proposal, Review, SessionLocal, Trade, UserSettings, init_db
 from .engine import Engine
 from .market.universe import FUNDAMENTALS, sector_of
 from .pipeline import features, halal, risk
-from .pipeline.agents import Agents
+from .pipeline.agents import Agents, call_cost
 from .team import hunter
 from .team.registry import AGENTS
 from .team.skills import SKILLS
@@ -26,8 +26,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("rahbeh")
 settings = get_settings()
 
-# $ per million tokens (input, output) for the usage estimate
-PRICES = {"claude-opus-5-5": (4.0, 20.0), "claude-sonnet-5-5": (2.0, 10.0), "claude-haiku-5-5": (0.10, 0.50), "claude-fable-5-1": (10.0, 50.0)}
 AUTOPILOT_UNLOCK_TRADES = 5 if settings.demo else 20
 
 engine: Engine | None = None
@@ -116,7 +114,7 @@ def proposal_out(p: Proposal) -> dict:
         "stop": p.stop, "target": p.target, "qty": p.qty, "risk_amount": p.risk_amount, "thesis": p.thesis,
         "analyst": p.analyst, "devil": p.devil, "manager": p.manager, "features": p.features,
         "risk_checks": p.risk_checks, "status": p.status, "status_reason": p.status_reason,
-        "agent_source": p.agent_source, "sector": sector_of(p.symbol), "team": p.team or {},
+        "agent_source": p.agent_source, "sector": sector_of(p.symbol), "team": p.team or {}, "backtest": p.backtest or {},
         "name": FUNDAMENTALS[p.symbol].name if p.symbol in FUNDAMENTALS else p.symbol,
     }
 
@@ -127,7 +125,7 @@ def trade_out(t: Trade, price: float | None = None) -> dict:
         "entry_price": t.entry_price, "initial_stop": t.initial_stop, "stop": t.stop, "target": t.target,
         "opened_at": iso(t.opened_at), "closed_at": iso(t.closed_at), "exit_price": t.exit_price,
         "exit_reason": t.exit_reason, "pnl": t.pnl, "r_multiple": t.r_multiple, "mode": t.mode, "notes": t.notes,
-        "origin": t.origin, "peak_price": t.peak_price, "keeper_log": t.keeper_log or [],
+        "origin": t.origin, "peak_price": t.peak_price, "keeper_log": t.keeper_log or [], "plan": t.plan or {},
     }
     if price is not None and t.closed_at is None:
         d["price"] = price
@@ -486,6 +484,39 @@ def sources():
     return rows
 
 
+# ---- backtests -----------------------------------------------------------------------------
+class LabIn(BaseModel):
+    symbols: list[str] | None = None
+    setups: list[str] | None = None
+    days: int | None = Field(None, ge=10, le=500)
+
+
+@app.post("/api/backtest/lab")
+def lab_start(body: LabIn | None = None):
+    b = body or LabIn()
+    return E().backtester.start_lab([x.upper() for x in b.symbols] if b.symbols else None, b.setups, b.days)
+
+
+@app.get("/api/backtest/lab/latest")
+def lab_latest():
+    bt = E().backtester
+    return bt.jobs.get(bt.latest_job) if bt.latest_job else None
+
+
+@app.get("/api/backtest/lab/{job_id}")
+def lab_get(job_id: str):
+    job = E().backtester.jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "unknown job")
+    return job
+
+
+@app.post("/api/backtest/{symbol}")
+def backtest_symbol(symbol: str):
+    """Backtest the setup firing on this stock right now, 1,000+ ways."""
+    return E().backtest_trade(symbol.upper())
+
+
 # ---- deal finder -----------------------------------------------------------------------------
 def _hunt_out(h) -> dict:
     d = h.to_dict()
@@ -577,14 +608,50 @@ def usage():
     with SessionLocal() as db:
         calls = db.scalars(select(AgentCall).where(AgentCall.at >= since)).all()
         recent = db.scalars(select(AgentCall).order_by(AgentCall.id.desc()).limit(25)).all()
-    cost = 0.0
-    for c in calls:
-        pin, pout = PRICES.get(c.model, PRICES["claude-opus-5-5"])
-        cost += (c.input_tokens * pin + c.output_tokens * pout) / 1e6
+        trades_24h = db.scalar(select(func.count(Trade.id)).where(Trade.opened_at >= since)) or 0
+    cost = sum(call_cost(c.model, c.input_tokens, c.output_tokens, c.cache_read_tokens) for c in calls)
+    agents = E().agents
     return {
         "calls_24h": len(calls), "errors_24h": sum(1 for c in calls if not c.ok),
         "input_tokens_24h": sum(c.input_tokens for c in calls), "output_tokens_24h": sum(c.output_tokens for c in calls),
         "cache_read_tokens_24h": sum(c.cache_read_tokens for c in calls), "est_cost_24h": round(cost, 4),
+        "trades_24h": trades_24h, "cost_per_trade": round(cost / trades_24h, 4) if trades_24h else None,
+        "budget_usd": settings.daily_ai_budget_usd, "spend_today": round(agents.spend_today(), 4), "over_budget": agents.over_budget(),
         "recent": [{"at": iso(c.at), "agent": c.agent, "symbol": c.symbol, "model": c.model, "in": c.input_tokens,
                     "out": c.output_tokens, "ms": c.latency_ms, "ok": c.ok, "error": c.error} for c in recent],
     }
+
+
+@app.get("/api/ab")
+def ab_test():
+    """Rules vs Claude on the same stocks at the same moment: which one's 'go' calls did better 60 minutes later?"""
+    with SessionLocal() as db:
+        rows = db.scalars(select(Shadow).where(Shadow.fwd_60.is_not(None)).order_by(Shadow.id.desc()).limit(2000)).all()
+        pending = db.scalar(select(func.count(Shadow.id)).where(Shadow.fwd_60.is_(None))) or 0
+
+    def side(go_attr: str) -> dict:
+        go = [r.fwd_60 for r in rows if getattr(r, go_attr)]
+        no = [r.fwd_60 for r in rows if not getattr(r, go_attr)]
+        avg = lambda xs: round(sum(xs) / len(xs), 4) if xs else None  # noqa: E731
+        return {"go": len(go), "no": len(no), "avg_fwd60_go": avg(go), "avg_fwd60_no": avg(no),
+                "hit_rate_go": round(sum(1 for x in go if x > 0) / len(go), 3) if go else None,
+                "edge": round(avg(go) - avg(no), 4) if go and no else None}
+
+    return {"samples": len(rows), "pending": pending, "claude": side("claude_go"), "rules": side("rules_go"),
+            "agreement": round(sum(1 for r in rows if r.claude_go == r.rules_go) / len(rows), 3) if rows else None,
+            "min_samples": 100, "note": "Needs an Anthropic key: Claude's calls are shadowed by the free rules on every analysis."}
+
+
+@app.get("/api/review/live-vs-backtest")
+def live_vs_backtest():
+    """Do live trades earn what their backtests promised? A big gap means the backtest is lying."""
+    with SessionLocal() as db:
+        rows = db.scalars(select(Trade).where(Trade.closed_at.is_not(None), Trade.exit_reason != "demo restart")).all()
+    tested = [t for t in rows if (t.plan or {}).get("expected_r") is not None and t.r_multiple is not None]
+    by: dict[str, list] = {}
+    for t in tested:
+        by.setdefault((t.plan or {}).get("setup") or "untuned", []).append(t)
+    summ = lambda ts: {"trades": len(ts), "expected_r": round(sum(t.plan["expected_r"] for t in ts) / len(ts), 3),  # noqa: E731
+                       "realized_r": round(sum(t.r_multiple for t in ts) / len(ts), 3)}
+    return {"overall": summ(tested) if tested else {"trades": 0}, "by_setup": {k: summ(v) for k, v in by.items()},
+            "untested_trades": len(rows) - len(tested)}

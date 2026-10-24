@@ -22,7 +22,9 @@ MAX_STOP_DISTANCE_PCT = 8.0
 LAST_ENTRY_ET = time(15, 30)
 FLATTEN_ET = time(15, 50)
 FIRST_ENTRY_ET = time(9, 35)  # skip the opening auction chaos
-EARNINGS_BLACKOUT_DAYS = 1  # no new positions when earnings are today or tomorrow
+EARNINGS_BLACKOUT_DAYS = 1
+PDT_MIN_EQUITY = 25_000.0  # US pattern-day-trader rule: under this, max 3 day trades per 5 business days
+PDT_MAX_DAYTRADES = 3  # no new positions when earnings are today or tomorrow
 
 ET = ZoneInfo("America/New_York")
 
@@ -73,6 +75,8 @@ class RiskContext:
     session_rules: bool = True  # off for the always-open demo market
     mood_level: str = "calm"  # calm | careful | stormy (pipeline/mood.py)
     mood_multiplier: float = 1.0  # scales risk per trade
+    daytrades_5d: int = 0  # day trades in the last 5 business days
+    swing: bool = False  # swing mode holds overnight, so the trade is not a day trade
 
 
 @dataclass
@@ -133,6 +137,10 @@ def evaluate(req: TradeRequest, ctx: RiskContext, limits: Limits) -> RiskDecisio
 
     hit = daily_loss_hit(ctx, lim)
     add("daily_loss", not hit, f"today's P&L {day_pnl(ctx):+,.2f} vs limit -{lim.daily_loss_limit_pct}%")
+
+    if not ctx.swing and ctx.account.equity < PDT_MIN_EQUITY:
+        left = PDT_MAX_DAYTRADES - ctx.daytrades_5d
+        add("pdt", left > 0, f"pattern-day-trader rule: {max(left, 0)} day trade(s) left this week (account under $25k)")
 
     add("trades_today", ctx.trades_today < lim.max_trades_per_day, f"{ctx.trades_today}/{lim.max_trades_per_day} trades today")
 

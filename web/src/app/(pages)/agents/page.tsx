@@ -20,9 +20,10 @@ const STAGES: { title: string; note: string; ids: string[]; flow?: "row" | "chai
   { title: "2 · Filter", note: "plain code, free, fast", ids: ["scanner", "halal"], edge: "only the interesting stocks" },
   { title: "3 · Specialists", note: "run side by side", ids: ["news", "chart", "company", "mood"], edge: "four reports" },
   { title: "4 · Decide", note: "each must agree to go on", ids: ["analyst", "devil", "manager"], flow: "chain", edge: "trade proposal" },
-  { title: "5 · Safety check", note: "plain code, final say", ids: ["risk"], highlight: true, edge: "approved order" },
-  { title: "6 · Trade and keep", note: "your broker + the AI watcher", ids: ["broker", "keeper"], edge: "results" },
-  { title: "7 · Learn", note: "after the close", ids: ["reviewer"], edge: "" },
+  { title: "5 · Prove it", note: "tested 1,000+ ways on history", ids: ["backtester"], edge: "proven setup + tested exits" },
+  { title: "6 · Safety check", note: "plain code, final say", ids: ["risk"], highlight: true, edge: "approved order" },
+  { title: "7 · Trade and keep", note: "your broker + the AI watcher", ids: ["broker", "keeper"], edge: "results" },
+  { title: "8 · Learn", note: "after the close", ids: ["reviewer"], edge: "" },
 ];
 
 const KIND: Record<AgentInfo["kind"], string> = { claude: "Claude", rules: "Rules", code: "Code" };

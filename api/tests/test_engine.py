@@ -120,3 +120,39 @@ def test_keeper_rules():
     assert rules_keeper(faded).action == "sell"
     calm = {**base, "position": {**base["position"], "price": 100.5, "r_multiple": 0.25}, "peak_r": 0.3, "trail_stop": 98}
     assert rules_keeper(calm).action == "hold"
+
+
+def test_backtest_gate_and_tested_exits(monkeypatch):
+    e = make_engine()
+    e.cycle()
+    sym = "AAPL"
+    no_edge = {"verdict": "no_edge", "reasons": ["out-of-sample expectancy -0.10R"], "variants_tested": 1152, "setup": "momentum"}
+    monkeypatch.setattr(e, "backtest_trade", lambda s: no_edge)
+    res = e.analyze(sym, propose=True)
+    gate = next(g for g in res["gates"] if g["name"] == "Backtest")
+    assert gate["passed"] is False and res["proposal_id"] is None
+
+    price = e.market.quote(sym).price
+    edge = {"verdict": "edge", "reasons": [], "variants_tested": 1152, "setup": "momentum", "basket": [sym],
+            "best": {"oos": {"exp_r": 0.4, "n": 40, "win": 0.5}},
+            "tuned_plan": {"entry": round(price, 2), "stop": round(price * 0.99, 2), "target": round(price * 1.02, 2),
+                           "max_hold_min": 30, "trail": "none", "expected_r": 0.4, "variant": "momentum|test"}}
+    monkeypatch.setattr(e, "backtest_trade", lambda s: edge)
+    res = e.analyze(sym, propose=True)
+    assert res["plan"]["tuned_by_backtest"] is True and res["plan"]["stop"] == edge["tuned_plan"]["stop"]
+    if res["proposal_id"]:  # other gates (score, risk) may still say no on this tick
+        ok, msg = e.approve(res["proposal_id"])
+        assert ok, msg
+        with SessionLocal() as db:
+            t = db.scalar(select(Trade).where(Trade.proposal_id == res["proposal_id"]))
+            assert t.plan["max_hold_min"] == 30 and t.plan["trail"] == "none"
+
+
+def test_cooldown_skips_rejected_symbols():
+    e = make_engine()
+    e.cycle()
+    e._cooldown("AAPL")
+    assert e._cooling("AAPL")
+    for _ in range(31):
+        e.market.tick()
+    assert not e._cooling("AAPL")  # expired after 30 simulated minutes
