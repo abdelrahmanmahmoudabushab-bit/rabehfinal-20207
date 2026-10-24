@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { TeamReportsView } from "@/components/app/team";
 import { api, refreshAll, useApi, type Analysis, type MarketRow } from "@/lib/api";
 import { useAi } from "@/lib/ai";
 import { money } from "@/lib/format";
@@ -231,6 +232,12 @@ function AnalysisCard({ a }: { a: Analysis }) {
       </div>
       <div className="space-y-3 p-3 text-sm">
         <p className="leading-relaxed">{a.analyst.thesis}</p>
+        {a.team && (
+          <details className="rounded-sm border px-2">
+            <summary className="cursor-pointer py-1.5 text-xs font-medium">Specialist reports (news, chart, company, mood)</summary>
+            <TeamReportsView team={a.team} compact />
+          </details>
+        )}
         <div className="bg-muted/50 rounded-sm p-2 text-xs">
           <span className="font-medium">Devil&apos;s advocate ({a.devil.severity}/5): </span>
           {a.devil.objection}

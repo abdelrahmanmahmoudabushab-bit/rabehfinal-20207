@@ -9,6 +9,7 @@ the app still works end to end — proposals say which one produced them.
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Literal, TypeVar
 
 import anthropic
@@ -22,6 +23,36 @@ T = TypeVar("T", bound=BaseModel)
 
 
 # ---- structured outputs ----------------------------------------------------------------
+class NewsReport(BaseModel):
+    sentiment: int  # -100 (very bearish) .. 100 (very bullish)
+    company_specific: bool
+    priced_in: bool
+    key_points: list[str]
+    summary: str
+
+
+class ChartReport(BaseModel):
+    trend: Literal["up", "down", "sideways"]
+    setup: str
+    support: float
+    resistance: float
+    strength: int  # 0-100
+    summary: str
+
+
+class CompanyReport(BaseModel):
+    health: Literal["strong", "ok", "weak"]
+    earnings_risk: bool
+    analyst_view: str
+    red_flags: list[str]
+    summary: str
+
+
+class MoodReport(BaseModel):
+    summary: str
+    watch_out_for: list[str]
+
+
 class AnalystReport(BaseModel):
     score: int  # 0-100 conviction that a long day trade works today
     direction: Literal["long", "skip"]
@@ -70,8 +101,22 @@ Ground rules for every agent:
 - When the evidence is thin or mixed, say so and lean towards not trading."""
 
 ROLE = {
-    "analyst": """Role: Analyst. Combine the news, the chart features and the company basics into one opinion
+    "news": """Role: News reader. Read only the headlines and filings provided for this stock. Judge how bullish or
+bearish they are (-100..100), whether they are about this company or the whole market, and whether the move already
+reflects them (priced_in). Official announcements and filings outrank articles. 2-4 key points, one-sentence summary.""",
+    "chart": """Role: Chart reader. Read only the price features provided (trend, VWAP, EMAs, RSI, ATR, volume, ranges).
+Name the setup in plain words (e.g. "pullback holding VWAP", "breakout on heavy volume", "stretched, likely to fade"),
+the nearest support and resistance prices, and a 0-100 strength score for a long day trade.""",
+    "company": """Role: Company checker. Read only the company data provided: fundamentals, next earnings date, recent
+earnings surprises, analyst ratings and SEC filings. Rate health (strong/ok/weak). earnings_risk is true when earnings
+are due within two days. List concrete red flags only if the data shows them.""",
+    "mood": """Role: Market mood. Read the VIX, rates, oil, the S&P 500 move, breadth and today's economic calendar.
+In 2-3 plain sentences say how risky the market is right now and what could move it. The level (calm/careful/stormy)
+is set by code; explain it, don't change it. List up to 3 things to watch today.""",
+    "analyst": """Role: Analyst. You receive reports from the News reader, Chart reader, Company checker and Market mood
+agents (team_reports), plus the raw data. Combine them into one opinion
 on whether this stock is a good long day trade right now. Score 0-100 where 65+ means "worth trading".
+Weigh disagreements between the specialists explicitly.
 direction must be "skip" when the setup is weak, bearish, or unclear.""",
     "devil": """Role: Devil's advocate. Make the strongest honest case AGAINST taking this trade.
 Pick the single most important objection. severity: 1 minor ... 5 deal breaker. Set deal_breaker only
@@ -156,6 +201,37 @@ class Agents:
                 db.add(rec)
                 db.commit()
 
+    # ---- specialists ----------------------------------------------------------------------
+    def team(self, ctx: dict) -> dict:
+        """News reader, Chart reader and Company checker. In the starter team they are rule-based (free);
+        with AGENT_TEAM=full each is its own Claude agent, run in parallel."""
+        rules = {"news": rules_news(ctx), "chart": rules_chart(ctx), "company": rules_company(ctx)}
+        out = {k: {**v.model_dump(), "by": "rules"} for k, v in rules.items()}
+        if not (self.client and self.s.agent_team == "full"):
+            return out
+        schemas = {"news": NewsReport, "chart": ChartReport, "company": CompanyReport}
+        views = {
+            "news": {k: ctx.get(k) for k in ("symbol", "as_of", "laya", "filings")},
+            "chart": {k: ctx.get(k) for k in ("symbol", "as_of", "features", "suggested_levels")},
+            "company": {k: ctx.get(k) for k in ("symbol", "as_of", "company", "earnings", "ratings", "filings")},
+        }
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futs = {k: pool.submit(self._parse, k, ctx["symbol"], views[k], schemas[k]) for k in schemas}
+            for k, f in futs.items():
+                try:
+                    out[k] = {**f.result().model_dump(), "by": "claude"}
+                except Exception as e:
+                    log.warning("%s agent fell back to rules: %s", k, e)
+        return out
+
+    def mood_report(self, mood: dict) -> dict:
+        if self.client and self.s.agent_team == "full":
+            try:
+                return {**self._parse("mood", None, mood, MoodReport).model_dump(), "by": "claude"}
+            except Exception as e:
+                log.warning("mood agent fell back to rules: %s", e)
+        return {"summary": mood.get("summary", ""), "watch_out_for": [e["event"] for e in mood.get("events", [])[:3]], "by": "rules"}
+
     # ---- agents ---------------------------------------------------------------------------
     def analyst(self, ctx: dict) -> tuple[AnalystReport, str]:
         if self.client:
@@ -236,6 +312,13 @@ def _heuristic_analyst(ctx: dict) -> AnalystReport:
     score += 5 if f["trend"] == "up" else 0
     score -= 10 if f["rsi14"] > 75 else 0
     score -= 5 if f["volume_ratio"] < 1.2 else 0
+    team = ctx.get("team_reports") or {}
+    if team.get("company", {}).get("earnings_risk"):
+        score -= 15
+    if team.get("company", {}).get("health") == "weak":
+        score -= 5
+    if (ctx.get("market_mood") or {}).get("level") == "careful":
+        score -= 5
     score = int(max(0, min(100, score)))
     heads = laya["headlines"]
     news_view = f"{len(heads)} recent headline(s), average tone {laya['sentiment']:+.2f}: \"{heads[0]['headline']}\"" if heads else "No company-specific news; the move is driven by trading activity."
@@ -324,3 +407,62 @@ def _template_answer(question: str, p: dict) -> str:
                 f"{f.get('trend', '?')}, RSI {f.get('rsi14', 0):.0f}, volume {f.get('volume_ratio', 0):.1f}x normal. "
                 "Add an Anthropic API key for full written answers from the Coach agent.")
     return "Add an Anthropic API key to enable the Coach agent's written answers. Pick a stock to see its live numbers."
+
+
+# ---- rule-based specialists (starter team) --------------------------------------------------
+def rules_news(ctx: dict) -> NewsReport:
+    laya, f = ctx["laya"], ctx["features"]
+    heads = laya["headlines"]
+    sent = int(round(laya["sentiment"] * 100))
+    filings = [x for x in ctx.get("filings") or [] if x["form"] == "8-K"][:1]
+    points = [h["headline"] for h in heads[:3]] + [f"8-K filed {x['filed']}: {x['description']}" for x in filings]
+    priced = bool(heads) and sent > 0 and f["change_30m_pct"] > 2
+    if heads:
+        summary = f"{len(heads)} recent headline(s), tone {sent:+d}/100" + (" — much of it may already be in the price." if priced else ".")
+    else:
+        summary = "No company news; any move is driven by trading activity or the market."
+    return NewsReport(sentiment=sent, company_specific=laya["company_news"], priced_in=priced, key_points=points or ["no recent headlines"], summary=summary)
+
+
+def rules_chart(ctx: dict) -> ChartReport:
+    f = ctx["features"]
+    price, vwap, atr = f["price"], f["vwap"], max(f["atr14"], f["price"] * 0.001)
+    if f["rsi14"] > 75:
+        setup = "stretched — likely to pull back before the next leg"
+    elif abs(price - vwap) <= 1.5 * atr and f["trend"] == "up":
+        setup = "pullback holding VWAP in an uptrend"
+    elif f["volume_ratio"] >= 1.8 and f["change_30m_pct"] > 0:
+        setup = "breakout on heavy volume"
+    elif f["trend"] == "down":
+        setup = "downtrend below VWAP — no long setup"
+    else:
+        setup = "range-bound, no clear edge"
+    support = round(vwap if price > vwap else f["day_low"], 2)
+    trend = {"up": "up", "down": "down"}.get(f["trend"], "sideways")
+    strength = int(max(0, min(100, 50 + f["momentum_score"] / 2 - (10 if f["rsi14"] > 75 else 0))))
+    return ChartReport(trend=trend, setup=setup, support=support, resistance=round(f["day_high"], 2), strength=strength,
+                       summary=f"{trend.capitalize()} trend, {setup}; RSI {f['rsi14']:.0f}, volume {f['volume_ratio']:.1f}x normal.")
+
+
+def rules_company(ctx: dict) -> CompanyReport:
+    co, earn, rat = ctx.get("company") or {}, ctx.get("earnings") or {}, ctx.get("ratings")
+    margin, debt = co.get("net_margin") or 0, co.get("debt_to_mcap") or 0
+    health = "strong" if margin > 0.15 and debt < 0.15 else "weak" if margin < 0.03 or debt > 0.5 else "ok"
+    flags = []
+    days = earn.get("days_until")
+    risk = days is not None and 0 <= days <= 2
+    if risk:
+        flags.append(f"earnings in {days} day(s) ({earn.get('next_hour') or 'time tbc'}) — overnight gap risk")
+    if debt > 0.5:
+        flags.append(f"debt is {debt:.0%} of market value")
+    hist = earn.get("history") or []
+    if hist and (hist[0].get("surprise_pct") or 0) < -5:
+        flags.append(f"missed estimates last quarter by {hist[0]['surprise_pct']:.1f}%")
+    for x in (ctx.get("filings") or [])[:5]:
+        if "Departure" in x["description"]:
+            flags.append(f"leadership change filed {x['filed']}")
+    view = "no analyst data"
+    if rat and rat.get("total"):
+        view = f"{rat['strong_buy'] + rat['buy']} buy / {rat['hold']} hold / {rat['sell'] + rat['strong_sell']} sell (score {rat['score']:.1f}/5)"
+    return CompanyReport(health=health, earnings_risk=risk, analyst_view=view, red_flags=flags,
+                         summary=f"{co.get('name', ctx['symbol'])}: {health} health, net margin {margin:.0%}, debt {debt:.0%} of market value; analysts {view}.")

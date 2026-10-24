@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     claude_model: str = "claude-opus-5-5"
     agent_effort: str = "medium"
     max_candidates_per_cycle: int = 3  # caps Claude spend per scan
+    # starter: specialists (news, chart, company, mood) are rule-based and only the Analyst, Devil's advocate,
+    # Manager, Reviewer and Coach call Claude. full: every specialist is its own Claude agent (about 2x the cost).
+    agent_team: str = "starter"
 
     # Broker and data. Without Alpaca keys the app runs on the built-in market simulator.
     alpaca_api_key: str | None = None
@@ -22,7 +25,9 @@ class Settings(BaseSettings):
     alpaca_paper: bool = True
     alpaca_data_feed: str = "iex"  # "sip" needs a paid Alpaca data plan
     finnhub_api_key: str | None = None  # second price source + news
-    fmp_api_key: str | None = None  # fundamentals
+    fmp_api_key: str | None = None  # fundamentals, economic calendar fallback
+    fred_api_key: str | None = None  # VIX, Fed funds, 10-year yield, oil (free key)
+    sec_user_agent: str = "Rahbeh research admin@example.com"  # SEC asks for a contact email here
 
     # Alerts
     telegram_bot_token: str | None = None

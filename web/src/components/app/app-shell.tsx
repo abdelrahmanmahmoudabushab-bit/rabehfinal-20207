@@ -12,6 +12,7 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/misc";
 import { AiButton, AiPanel } from "@/components/app/ai-panel";
 import { KillSwitch } from "@/components/app/kill-switch";
+import { MoodChip } from "@/components/app/mood-chip";
 import { useApi, type Dashboard, type Status } from "@/lib/api";
 import { signedMoney, timeAgo, tone } from "@/lib/format";
 import { useI18n, type Key } from "@/lib/i18n";
@@ -20,6 +21,7 @@ import { cn } from "@/lib/utils";
 const NAV: { href: string; key: Key }[] = [
   { href: "/", key: "chart" },
   { href: "/portfolio", key: "portfolio" },
+  { href: "/agents", key: "agents" },
   { href: "/ideas", key: "ideas" },
   { href: "/trades", key: "trades" },
   { href: "/log", key: "log" },
@@ -125,6 +127,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </TooltipContent>
             </Tooltip>
           )}
+          <MoodChip />
           <AiButton />
           <ThemeToggle />
           <Button variant="ghost" size="sm" onClick={() => setLang(lang === "en" ? "ar" : "en")} className="px-2 font-semibold">

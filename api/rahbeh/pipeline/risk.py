@@ -22,6 +22,7 @@ MAX_STOP_DISTANCE_PCT = 8.0
 LAST_ENTRY_ET = time(15, 30)
 FLATTEN_ET = time(15, 50)
 FIRST_ENTRY_ET = time(9, 35)  # skip the opening auction chaos
+EARNINGS_BLACKOUT_DAYS = 1  # no new positions when earnings are today or tomorrow
 
 ET = ZoneInfo("America/New_York")
 
@@ -57,6 +58,7 @@ class TradeRequest:
     entry: float
     stop: float
     target: float
+    earnings_in_days: int | None = None  # None = unknown
 
 
 @dataclass
@@ -69,6 +71,8 @@ class RiskContext:
     kill_switch: bool
     now: datetime
     session_rules: bool = True  # off for the always-open demo market
+    mood_level: str = "calm"  # calm | careful | stormy (pipeline/mood.py)
+    mood_multiplier: float = 1.0  # scales risk per trade
 
 
 @dataclass
@@ -120,6 +124,13 @@ def evaluate(req: TradeRequest, ctx: RiskContext, limits: Limits) -> RiskDecisio
         add("session", FIRST_ENTRY_ET <= et <= LAST_ENTRY_ET,
             f"new trades allowed {FIRST_ENTRY_ET:%H:%M}–{LAST_ENTRY_ET:%H:%M} ET (now {et:%H:%M})")
 
+    add("market_mood", ctx.mood_level != "stormy",
+        f"market mood {ctx.mood_level}" + ("" if ctx.mood_multiplier == 1 else f" — size x{ctx.mood_multiplier:g}"))
+
+    if req.earnings_in_days is not None:
+        soon = 0 <= req.earnings_in_days <= EARNINGS_BLACKOUT_DAYS
+        add("earnings", not soon, f"earnings in {req.earnings_in_days} day(s)" + (" — gap risk, no new position" if soon else ""))
+
     hit = daily_loss_hit(ctx, lim)
     add("daily_loss", not hit, f"today's P&L {day_pnl(ctx):+,.2f} vs limit -{lim.daily_loss_limit_pct}%")
 
@@ -146,7 +157,7 @@ def evaluate(req: TradeRequest, ctx: RiskContext, limits: Limits) -> RiskDecisio
     equity = ctx.account.equity
     qty = 0
     if shape_ok and per_share_risk > 0:
-        qty = math.floor(equity * lim.risk_per_trade_pct / 100 / per_share_risk)
+        qty = math.floor(equity * lim.risk_per_trade_pct / 100 * min(ctx.mood_multiplier, 1.0) / per_share_risk)
         qty = min(qty, math.floor(equity * lim.max_position_pct / 100 / req.entry))
         sector_value = sum(p.market_value for p in ctx.positions if ctx.sector_of.get(p.symbol) == req.sector)
         sector_room = equity * lim.max_sector_pct / 100 - sector_value

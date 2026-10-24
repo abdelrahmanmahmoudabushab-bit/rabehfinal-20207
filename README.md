@@ -31,6 +31,30 @@ To go further, fill in `api/.env` (see `api/.env.example`):
 | `FMP_API_KEY` | Live fundamentals for company checks and halal ratios. |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Alerts on your phone. |
 
+## Data sources
+
+The **Agents** page in the app shows each source's live status. Each source is optional; without its key the app falls back to a simulated or built-in value and says so.
+
+| Data | Source | Key |
+| --- | --- | --- |
+| Prices, minute bars, chart candles, news, market clock, orders | Alpaca (paper by default) | `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` |
+| Company filings (8-K, 10-Q, 10-K, insider Form 4, 13D/G) | SEC EDGAR (free) | `SEC_USER_AGENT` (your contact email) |
+| Second price source, earnings dates and EPS surprises, analyst ratings, economic calendar | Finnhub | `FINNHUB_API_KEY` |
+| VIX, Fed funds rate, 10-year yield, oil | FRED, St. Louis Fed (free key) | `FRED_API_KEY` |
+| Fundamentals, economic calendar fallback | Financial Modeling Prep | `FMP_API_KEY` |
+| AI agents | Anthropic Claude | `ANTHROPIC_API_KEY` |
+
+These are not wired yet: short interest, unusual options activity, earnings call transcripts, and Gulf/Egypt prices with Arabic news. Each needs a paid or regional data vendor.
+
+## The agent team
+
+- **Specialists:** News reader, Chart reader, Company checker and Market mood each write a report.
+- **Decision:** the Analyst combines the reports and scores the trade. The Devil's advocate argues against it, and the Manager answers the objection and sets the plan.
+- **Safety:** the plain-code risk engine has the final say.
+- **Team size:** `AGENT_TEAM=starter` (the default) runs the specialists as free rules. `AGENT_TEAM=full` makes each specialist its own Claude agent, at roughly twice the agent cost.
+- **Market mood** sets position size: *calm* means full size, *careful* means half size, and *stormy* means no new trades.
+- **Earnings:** no new position is opened when a company reports today or tomorrow.
+
 ## How a trade happens (`api/rahbeh/engine.py`)
 
 Every scan (60 s by default) each stock must pass seven checks. Every "no" is logged and shown in **Decision log**.

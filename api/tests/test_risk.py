@@ -90,3 +90,17 @@ def test_trailing_stop():
     assert risk.trail_stop(100, 98, 98, 102) == 100  # +1R: breakeven
     assert risk.trail_stop(100, 98, 100, 105) == 103  # +2.5R: trail 1R behind
     assert risk.trail_stop(100, 98, 103, 104) == 103  # never lowers
+
+
+def test_market_mood_scales_and_blocks():
+    careful = risk.evaluate(req(), ctx(mood_level="careful", mood_multiplier=0.5), LIMITS)
+    assert careful.approved and careful.risk_amount == 400  # still capped by the 20% position size
+    small = risk.Limits(**{**LIMITS.__dict__, "risk_per_trade_pct": 0.2})
+    assert risk.evaluate(req(), ctx(mood_level="careful", mood_multiplier=0.5), small).qty == 50  # 0.2% * 0.5 = $100 / $2
+    stormy = risk.evaluate(req(), ctx(mood_level="stormy", mood_multiplier=0.0), LIMITS)
+    assert not stormy.approved and any(c.name == "market_mood" for c in stormy.failed)
+
+
+def test_earnings_blackout():
+    assert not risk.evaluate(risk.TradeRequest("AAPL", "Technology", 100, 98, 104, earnings_in_days=1), ctx(), LIMITS).approved
+    assert risk.evaluate(risk.TradeRequest("AAPL", "Technology", 100, 98, 104, earnings_in_days=5), ctx(), LIMITS).approved

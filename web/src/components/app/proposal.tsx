@@ -11,6 +11,7 @@ import { Separator } from "@/components/ui/misc";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RangeBar, ScoreRing } from "@/components/app/bits";
+import { TeamReportsView } from "@/components/app/team";
 import { useAi } from "@/lib/ai";
 import { api, refreshAll, type Proposal } from "@/lib/api";
 import { money, num, timeAgo } from "@/lib/format";
@@ -165,6 +166,7 @@ export function ProposalSheet({ p, open, onOpenChange }: { p: Proposal; open: bo
         <Tabs defaultValue="thesis" className="px-5">
           <TabsList className="w-full">
             <TabsTrigger value="thesis">{t("thesis")}</TabsTrigger>
+            <TabsTrigger value="team">Team</TabsTrigger>
             <TabsTrigger value="debate">{t("debate")}</TabsTrigger>
             <TabsTrigger value="safety">{t("safety")}</TabsTrigger>
           </TabsList>
@@ -223,6 +225,11 @@ export function ProposalSheet({ p, open, onOpenChange }: { p: Proposal; open: bo
                 </ul>
               </div>
             )}
+          </TabsContent>
+
+          <TabsContent value="team" className="pt-1">
+            <p className="text-muted-foreground pt-2 text-xs">What each specialist reported before the Analyst made its call.</p>
+            <TeamReportsView team={p.team ?? {}} />
           </TabsContent>
 
           <TabsContent value="debate" className="space-y-4 pt-3">

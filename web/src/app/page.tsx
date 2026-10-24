@@ -12,6 +12,7 @@ import { Skeleton } from "@/components/ui/misc";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ProposalSheet } from "@/components/app/proposal";
+import { EarningsBlock, FilingsList, RatingsBlock } from "@/components/app/team";
 import { TvChart, type Indicators, type Legend } from "@/components/app/tv-chart";
 import { useAi } from "@/lib/ai";
 import {
@@ -391,6 +392,20 @@ function InfoPanel({
           <Skeleton className="h-40" />
         )}
       </Section>
+
+      {stock && (
+        <>
+          <Section title="Earnings">
+            <EarningsBlock e={stock.earnings} />
+          </Section>
+          <Section title="Analyst ratings">
+            <RatingsBlock r={stock.ratings} />
+          </Section>
+          <Section title="SEC filings">
+            <FilingsList items={stock.filings} />
+          </Section>
+        </>
+      )}
 
       {stock && stock.laya.reasons.length > 0 && (
         <Section title="Why the scanner noticed">

@@ -16,8 +16,9 @@ from .db import (
     Alert, Briefing, DecisionLog, EquitySnapshot, Proposal, Review, SessionLocal, StoredBar, Trade, UserSettings,
 )
 from .market.base import MarketData
+from .market.extras import Extras, LiveExtras, SimExtras
 from .market.universe import BENCHMARK, sector_of
-from .pipeline import checks, features, halal, laya, risk
+from .pipeline import checks, features, halal, laya, mood, risk
 from .pipeline.agents import Agents, suggested_levels
 
 log = logging.getLogger(__name__)
@@ -29,8 +30,12 @@ DEMO_TIME_STOP = timedelta(minutes=120)  # the always-open demo has no 15:50 clo
 
 
 class Engine:
-    def __init__(self, s: Settings, market: MarketData, broker: Broker, agents: Agents):
+    def __init__(self, s: Settings, market: MarketData, broker: Broker, agents: Agents, extras: Extras | None = None):
         self.s, self.market, self.broker, self.agents = s, market, broker, agents
+        self.extras: Extras = extras or (SimExtras(market) if s.demo else LiveExtras(s))
+        self.mood: mood.Mood | None = None
+        self.mood_report: dict = {}
+        self._mood_report_at = 0.0
         self.lock = threading.RLock()
         self.paused: dict[str, datetime] = {}
         self._alerted: dict[str, datetime] = {}
@@ -80,7 +85,47 @@ class Engine:
             sector_of={p.symbol: sector_of(p.symbol) for p in positions},
             realized_pnl_today=0.0, trades_today=n_today, kill_switch=u.kill_switch,
             now=self.market.now(), session_rules=self.session_rules,
+            mood_level=self.mood.level if self.mood else "calm",
+            mood_multiplier=self.mood.risk_multiplier if self.mood else 1.0,
         )
+
+    def earnings_ctx(self, symbol: str) -> dict:
+        e = self.extras.earnings(symbol)
+        return {"next_date": e.next_date, "next_hour": e.next_hour, "eps_estimate": e.eps_estimate,
+                "days_until": e.days_until(self.market.now().astimezone(ET).date()), "history": e.history}
+
+    def ratings_ctx(self, symbol: str) -> dict | None:
+        r = self.extras.ratings(symbol)
+        if not r:
+            return None
+        return {"period": r.period, "strong_buy": r.strong_buy, "buy": r.buy, "hold": r.hold, "sell": r.sell,
+                "strong_sell": r.strong_sell, "total": r.total, "score": round(r.score, 2) if r.score else None}
+
+    def update_mood(self) -> None:
+        """Market mood: recomputed every cycle from VIX, rates, the S&P 500, breadth and the economic calendar."""
+        try:
+            spy = self.market.minute_bars(BENCHMARK, 400)
+            spy_chg = features.compute(spy, self.market.daily_bars(BENCHMARK, 5)).change_day_pct if len(spy) > 1 else 0.0
+            ups = total = 0
+            for sym in self.market.universe():
+                bars = self.market.minute_bars(sym, 400)
+                if len(bars) > 1:
+                    total += 1
+                    ups += features.compute(bars, self.market.daily_bars(sym, 5)).change_day_pct > 0
+            new = mood.assess(self.extras.mood_inputs(), spy_chg, ups / total * 100 if total else 50, self.market.now())
+        except Exception as e:
+            log.warning("mood update failed: %s", e)
+            return
+        old = self.mood.level if self.mood else None
+        self.mood = new
+        if old is not None and old != new.level:
+            with SessionLocal() as db:
+                self.log(db, "mood", "alert" if new.level != "calm" else "info", f"market mood {old} → {new.level}: {'; '.join(new.reasons)}")
+                self.alert(db, "warn" if new.level != "calm" else "info", f"Market mood: {new.level}", new.summary)
+                db.commit()
+        if time.monotonic() - self._mood_report_at > 900 or old != new.level:
+            self.mood_report = self.agents.mood_report(new.to_dict())
+            self._mood_report_at = time.monotonic()
 
     def stock_context(self, symbol: str, with_news: bool = True) -> dict | None:
         """Everything the agents may see about one stock, already checked and time-stamped."""
@@ -107,6 +152,10 @@ class Engine:
             "laya": {"sentiment": lr.sentiment, "score": lr.score, "reasons": lr.reasons, "headlines": lr.headlines,
                      "worth_a_look": lr.worth_a_look, "company_news": lr.company_news},
             "company": company, "suggested_levels": suggested_levels(f.to_dict()),
+            "earnings": self.earnings_ctx(symbol), "ratings": self.ratings_ctx(symbol),
+            "filings": [vars(x) for x in self.extras.filings(symbol, 6)],
+            "market_mood": {"level": self.mood.level, "reasons": self.mood.reasons, "summary": self.mood.summary,
+                            "vix": self.mood.vix, "spy_change_pct": self.mood.spy_change_pct} if self.mood else None,
         }
 
     # ---- the cycle ---------------------------------------------------------------------------
@@ -122,6 +171,7 @@ class Engine:
         refresh = getattr(self.market, "refresh", None) or getattr(self.market, "tick", None)
         if refresh:
             refresh()
+        self.update_mood()
         self.manage_positions()
         summary = self.scan() if self.market.is_open() else {"skipped": "market closed"}
         self.snapshot()
@@ -146,6 +196,10 @@ class Engine:
             u = self.settings_row(db)
             if u.kill_switch:
                 return {**summary, "skipped": "kill switch on"}
+            if self.mood and self.mood.level == "stormy":
+                self.log(db, "mood", "no", f"market mood stormy — no new trades ({'; '.join(self.mood.reasons)})")
+                db.commit()
+                return {**summary, "skipped": "market mood stormy"}
             ctx_risk = self.risk_context(db, u)
             if risk.daily_loss_hit(ctx_risk, self.limits(u)):
                 self.alert(db, "critical", "Daily loss limit hit — trading paused for today",
@@ -211,11 +265,14 @@ class Engine:
             return False
         ctx["lessons_from_reviewer"] = lessons
         ctx["user_strategy"] = u.strategy
-        # 5. Scanner + Analyst score it
+        # 5. Specialists report (news, chart, company, mood), then the Analyst combines and scores
+        team = self.agents.team(ctx)
+        team["mood"] = {**self.mood_report, "level": self.mood.level if self.mood else "calm"}
+        ctx["team_reports"] = team
         rep, src = self.agents.analyst(ctx)
         if rep.direction != "long" or rep.score < u.score_threshold:
             self.log(db, "score", "no", f"score {rep.score} below line {u.score_threshold}" if rep.direction == "long"
-                     else f"analyst says skip (score {rep.score}): {rep.thesis}", sym, {"analyst": rep.model_dump()})
+                     else f"analyst says skip (score {rep.score}): {rep.thesis}", sym, {"analyst": rep.model_dump(), "team": team})
             return False
         # 6. Devil's advocate, objection answered?
         dv, _ = self.agents.devil(ctx, rep)
@@ -225,13 +282,13 @@ class Engine:
                      {"devil": dv.model_dump(), "manager": mg.model_dump()})
             return False
         # 7. Risk engine: within limits?
-        req = risk.TradeRequest(sym, sector_of(sym), mg.entry, mg.stop, mg.target)
+        req = risk.TradeRequest(sym, sector_of(sym), mg.entry, mg.stop, mg.target, ctx["earnings"]["days_until"])
         rd = risk.evaluate(req, self.risk_context(db, u), self.limits(u))
         prop = Proposal(
             symbol=sym, score=rep.score, entry=mg.entry, stop=mg.stop, target=mg.target, qty=rd.qty,
             risk_amount=rd.risk_amount, thesis=rep.thesis, analyst=rep.model_dump(), devil=dv.model_dump(),
             manager=mg.model_dump(), features={**ctx["features"], "headlines": ctx["laya"]["headlines"]},
-            risk_checks=rd.as_list(), status="blocked", agent_source=src, created_at=self.market.now(),
+            risk_checks=rd.as_list(), status="blocked", agent_source=src, created_at=self.market.now(), team=team,
         )
         db.add(prop)
         if not rd.approved:
@@ -266,15 +323,19 @@ class Engine:
             u = self.settings_row(db)
             cached = self._analysis_cache.get(sym)
             if propose and cached and time.monotonic() - cached[0] < ANALYSIS_CACHE_SECONDS:
-                rep, dv, mg, src = cached[1]  # "Send to Ideas" right after an analysis: reuse it, don't pay twice
+                rep, dv, mg, src, team = cached[1]  # "Send to Ideas" right after an analysis: reuse it, don't pay twice
             else:
                 ctx["lessons_from_reviewer"] = self._latest_lessons(db)
                 ctx["user_strategy"] = u.strategy
+                team = self.agents.team(ctx)
+                team["mood"] = {**self.mood_report, "level": self.mood.level if self.mood else "calm"}
+                ctx["team_reports"] = team
                 rep, src = self.agents.analyst(ctx)
                 dv, _ = self.agents.devil(ctx, rep)
                 mg, _ = self.agents.manager(ctx, rep, dv)
-                self._analysis_cache[sym] = (time.monotonic(), (rep, dv, mg, src))
-            rd = risk.evaluate(risk.TradeRequest(sym, sector_of(sym), mg.entry, mg.stop, mg.target), self.risk_context(db, u), self.limits(u))
+                self._analysis_cache[sym] = (time.monotonic(), (rep, dv, mg, src, team))
+            days = ctx["earnings"]["days_until"]
+            rd = risk.evaluate(risk.TradeRequest(sym, sector_of(sym), mg.entry, mg.stop, mg.target, days), self.risk_context(db, u), self.limits(u))
             gates = [
                 {"name": "Data OK", "passed": dc.ok, "detail": "; ".join(dc.problems) or "clean"},
                 {"name": "Halal", "passed": hr.passes or not u.halal_only,
@@ -282,6 +343,10 @@ class Engine:
                 {"name": "Score line", "passed": rep.direction == "long" and rep.score >= u.score_threshold,
                  "detail": f"{rep.score} vs line {u.score_threshold}" + ("" if rep.direction == "long" else " — analyst says skip")},
                 {"name": "Objection answered", "passed": mg.objection_answered and mg.decision == "trade", "detail": dv.objection},
+                {"name": "Market mood", "passed": not self.mood or self.mood.level != "stormy",
+                 "detail": f"{self.mood.level}: {'; '.join(self.mood.reasons)}" if self.mood else "not assessed yet"},
+                {"name": "Earnings", "passed": days is None or not 0 <= days <= risk.EARNINGS_BLACKOUT_DAYS,
+                 "detail": f"next report in {days} day(s)" if days is not None else "date unknown"},
                 {"name": "Risk engine", "passed": rd.approved, "detail": rd.reason},
             ]
             verdict = all(g["passed"] for g in gates)
@@ -292,7 +357,7 @@ class Engine:
                     risk_amount=rd.risk_amount, thesis=rep.thesis, analyst=rep.model_dump(), devil=dv.model_dump(),
                     manager=mg.model_dump(), features={**ctx["features"], "headlines": ctx["laya"]["headlines"]},
                     risk_checks=rd.as_list(), status="idea" if u.mode == "research" else "pending",
-                    status_reason="requested from chart", agent_source=src, created_at=now,
+                    status_reason="requested from chart", agent_source=src, created_at=now, team=team,
                 )
                 db.add(prop)
                 db.flush()
@@ -303,7 +368,7 @@ class Engine:
             "symbol": sym, "source": src, "verdict": "trade" if verdict else "no trade", "gates": gates,
             "analyst": rep.model_dump(), "devil": dv.model_dump(), "manager": mg.model_dump(),
             "plan": {"entry": mg.entry, "stop": mg.stop, "target": mg.target, "qty": rd.qty, "risk_amount": rd.risk_amount},
-            "risk_checks": rd.as_list(), "proposal_id": proposal_id,
+            "risk_checks": rd.as_list(), "proposal_id": proposal_id, "team": team,
         }
 
     def _expire_proposals(self, db) -> None:
@@ -334,7 +399,8 @@ class Engine:
                 return False, prop.status_reason
             # keep the stop/target distances, re-anchored to the live price
             entry, stop, target = q.price, prop.stop, prop.target
-            rd = risk.evaluate(risk.TradeRequest(prop.symbol, sector_of(prop.symbol), entry, stop, target),
+            days = self.earnings_ctx(prop.symbol)["days_until"]
+            rd = risk.evaluate(risk.TradeRequest(prop.symbol, sector_of(prop.symbol), entry, stop, target, days),
                                self.risk_context(db, u), self.limits(u))
             prop.risk_checks = rd.as_list()
             if not rd.approved:

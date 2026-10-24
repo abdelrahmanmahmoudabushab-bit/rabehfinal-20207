@@ -56,3 +56,16 @@ def test_candles_and_analyze():
     assert res["verdict"] in ("trade", "no trade")
     assert {g["name"] for g in res["gates"]} >= {"Data OK", "Score line", "Risk engine"}
     assert (res["proposal_id"] is not None) == (res["verdict"] == "trade")
+
+
+def test_context_has_extras_and_team():
+    e = make_engine()
+    e.cycle()
+    assert e.mood is not None and e.mood.level in ("calm", "careful", "stormy")
+    ctx = e.stock_context("NFLX")
+    assert ctx["earnings"]["days_until"] == 1 and ctx["filings"] and ctx["ratings"]["total"] > 0
+    team = e.agents.team(ctx)
+    assert team["company"]["earnings_risk"] is True and team["news"]["by"] == "rules"
+    res = e.analyze("NFLX")
+    gate = next(g for g in res["gates"] if g["name"] == "Earnings")
+    assert gate["passed"] is False and res["verdict"] == "no trade"

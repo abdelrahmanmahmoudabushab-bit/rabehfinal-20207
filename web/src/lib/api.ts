@@ -158,7 +158,99 @@ export interface Proposal {
   status: "idea" | "pending" | "executed" | "rejected" | "expired" | "blocked";
   status_reason: string | null;
   agent_source: "claude" | "heuristic";
+  team: TeamReports;
   trade?: Trade | null;
+}
+
+export interface TeamReports {
+  news?: { sentiment: number; company_specific: boolean; priced_in: boolean; key_points: string[]; summary: string; by: string };
+  chart?: { trend: string; setup: string; support: number; resistance: number; strength: number; summary: string; by: string };
+  company?: { health: string; earnings_risk: boolean; analyst_view: string; red_flags: string[]; summary: string; by: string };
+  mood?: { level?: string; summary: string; watch_out_for: string[]; by: string };
+}
+
+export interface MacroEvent {
+  time: string;
+  country: string;
+  event: string;
+  impact: "high" | "medium" | "low";
+}
+
+export interface Mood {
+  level: "calm" | "careful" | "stormy";
+  risk_multiplier: number;
+  reasons: string[];
+  spy_change_pct: number;
+  breadth_pct: number;
+  vix: number | null;
+  vix_change: number | null;
+  fed_funds: number | null;
+  ten_year: number | null;
+  ten_year_change_bp: number | null;
+  oil: number | null;
+  oil_change_pct: number | null;
+  events: MacroEvent[];
+  next_event: MacroEvent | null;
+  summary: string;
+  source: string;
+  report: { summary: string; watch_out_for: string[]; by: string };
+}
+
+export interface AgentInfo {
+  id: string;
+  name: string;
+  kind: "claude" | "rules" | "code";
+  when: string;
+  job: string;
+  reads: string[];
+  writes: string;
+  module?: string;
+  calls_24h: number;
+  errors_24h: number;
+  avg_ms: number | null;
+  tokens_24h: number;
+}
+
+export interface AgentsOverview {
+  team_mode: string;
+  claude: boolean;
+  model: string | null;
+  agents: AgentInfo[];
+  runs: Proposal[];
+}
+
+export interface Source {
+  name: string;
+  provides: string;
+  status: "connected" | "simulated" | "missing_key" | "not_wired";
+  env: string;
+  note: string;
+}
+
+export interface Earnings {
+  next_date: string | null;
+  next_hour: string | null;
+  eps_estimate: number | null;
+  days_until: number | null;
+  history: { period: string; estimate: number | null; actual: number | null; surprise_pct: number | null }[];
+}
+
+export interface Ratings {
+  period: string;
+  strong_buy: number;
+  buy: number;
+  hold: number;
+  sell: number;
+  strong_sell: number;
+  total: number;
+  score: number | null;
+}
+
+export interface Filing {
+  form: string;
+  filed: string;
+  description: string;
+  url: string;
 }
 
 export interface LogRow {
@@ -222,6 +314,9 @@ export interface StockDetail {
   halal: { passes: boolean; reasons: string[]; debt_ratio: number | null; cash_ratio: number | null };
   bars: { t: string; c: number; v: number }[];
   news: Headline[];
+  earnings: Earnings;
+  ratings: Ratings | null;
+  filings: Filing[];
 }
 
 export interface Review {
@@ -267,6 +362,7 @@ export interface Analysis {
   plan: { entry: number; stop: number; target: number; qty: number; risk_amount: number };
   risk_checks: RiskCheck[];
   proposal_id: number | null;
+  team: TeamReports;
 }
 
 export interface CandlesResponse {

@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from .config import get_settings
@@ -63,6 +63,7 @@ class Proposal(Base):
     status: Mapped[str] = mapped_column(String(16), index=True)
     status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     agent_source: Mapped[str] = mapped_column(String(16), default="claude")  # claude | heuristic
+    team: Mapped[dict] = mapped_column(JSON, default=dict)  # specialist reports: news, chart, company, mood
 
 
 class Trade(Base):
@@ -181,7 +182,21 @@ SessionLocal = sessionmaker(engine, expire_on_commit=False)
 
 def init_db() -> None:
     Base.metadata.create_all(engine)
+    _add_missing_columns()
     with SessionLocal() as s:
         if s.get(UserSettings, 1) is None:
             s.add(UserSettings(id=1))
             s.commit()
+
+
+def _add_missing_columns() -> None:
+    """Tiny forward-only migration: add columns that newer versions introduced to existing tables."""
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                continue
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name not in have:
+                    conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {col.type.compile(engine.dialect)}'))

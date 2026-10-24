@@ -113,7 +113,7 @@ def proposal_out(p: Proposal) -> dict:
         "stop": p.stop, "target": p.target, "qty": p.qty, "risk_amount": p.risk_amount, "thesis": p.thesis,
         "analyst": p.analyst, "devil": p.devil, "manager": p.manager, "features": p.features,
         "risk_checks": p.risk_checks, "status": p.status, "status_reason": p.status_reason,
-        "agent_source": p.agent_source, "sector": sector_of(p.symbol),
+        "agent_source": p.agent_source, "sector": sector_of(p.symbol), "team": p.team or {},
         "name": FUNDAMENTALS[p.symbol].name if p.symbol in FUNDAMENTALS else p.symbol,
     }
 
@@ -418,6 +418,107 @@ def analyze(symbol: str, propose: bool = False):
         return E().analyze(symbol, propose)
     except ValueError as err:
         raise HTTPException(404, str(err))
+
+
+@app.get("/api/mood")
+def market_mood():
+    e = E()
+    if e.mood is None:
+        e.update_mood()
+    return {**(e.mood.to_dict() if e.mood else {}), "report": e.mood_report}
+
+
+def _agent_roster() -> list[dict]:
+    claude = settings.claude_enabled
+    full = claude and settings.agent_team == "full"
+
+    def kind(uses_claude: bool) -> str:
+        return "claude" if uses_claude else "rules"
+
+    return [
+        {"id": "data_checks", "name": "Data checks", "kind": "code", "when": "always",
+         "job": "Rejects gaps, impossible jumps, zero volume, stale prices and sources that disagree; pauses the stock.",
+         "reads": ["prices", "minute bars", "second price source"], "writes": "data OK / pause", "module": "pipeline/checks.py"},
+        {"id": "scanner", "name": "Scanner (LAYA)", "kind": "code", "when": "starter",
+         "job": "Finds stocks moving on news or heavy trading; only the top few reach the paid agents.",
+         "reads": ["feature scores", "headlines"], "writes": "ranked shortlist", "module": "pipeline/laya.py"},
+        {"id": "halal", "name": "Halal checker", "kind": "code", "when": "early add",
+         "job": "Screens out banks, alcohol, tobacco, gambling, weapons and heavy debt for users who switch it on.",
+         "reads": ["business type", "debt", "cash"], "writes": "pass / fail", "module": "pipeline/halal.py"},
+        {"id": "news", "name": "News reader", "kind": kind(full), "when": "split out",
+         "job": "Reads headlines and filings as they land: bullish or bearish, company or market, already priced in?",
+         "reads": ["headlines", "SEC filings"], "writes": "news report", "agent_key": "news"},
+        {"id": "chart", "name": "Chart reader", "kind": kind(full), "when": "split out",
+         "job": "Trend, momentum and price patterns; names the setup, support and resistance.",
+         "reads": ["candles", "VWAP", "EMA", "RSI", "volume"], "writes": "chart report", "agent_key": "chart"},
+        {"id": "company", "name": "Company checker", "kind": kind(full), "when": "split out",
+         "job": "Earnings, debt and company health; flags earnings within two days.",
+         "reads": ["fundamentals", "earnings dates & surprises", "analyst ratings", "filings"], "writes": "company report", "agent_key": "company"},
+        {"id": "mood", "name": "Market mood", "kind": kind(full), "when": "split out",
+         "job": "Interest rates, VIX, oil and the economic calendar; says when to be careful (halves size or stops new trades).",
+         "reads": ["VIX", "Fed funds", "10-year yield", "oil", "economic calendar", "S&P 500", "breadth"], "writes": "calm / careful / stormy", "agent_key": "mood"},
+        {"id": "analyst", "name": "Analyst", "kind": kind(claude), "when": "starter",
+         "job": "Combines the specialists' reports into one opinion and a 0-100 score.",
+         "reads": ["all specialist reports", "reviewer lessons"], "writes": "score + thesis", "agent_key": "analyst"},
+        {"id": "devil", "name": "Devil's advocate", "kind": kind(claude), "when": "early add",
+         "job": "Argues against every trade; the objection must be answered or the trade dies.",
+         "reads": ["analyst report", "raw data"], "writes": "strongest objection", "agent_key": "devil"},
+        {"id": "manager", "name": "Manager", "kind": kind(claude), "when": "starter",
+         "job": "Final call: answers the objection and sets entry, stop and target.",
+         "reads": ["analyst", "devil's advocate"], "writes": "trade plan", "agent_key": "manager"},
+        {"id": "risk", "name": "Risk engine", "kind": "code", "when": "always",
+         "job": "Plain code with the final say: 1% risk cap, daily loss stop, exposure, earnings blackout, market mood, kill switch.",
+         "reads": ["trade plan", "account", "positions", "market mood", "earnings date"], "writes": "approved size / block", "module": "pipeline/risk.py"},
+        {"id": "broker", "name": "Order placer", "kind": "code", "when": "always",
+         "job": "Sends bracket orders, raises stops, closes everything by 15:50 ET.",
+         "reads": ["approved order"], "writes": "fills", "module": "broker/"},
+        {"id": "reviewer", "name": "Reviewer", "kind": kind(claude), "when": "starter",
+         "job": "After the close, grades every trade, writes lessons, and changes a rule only if it beats the live version.",
+         "reads": ["trades", "every 'no'", "S&P 500"], "writes": "lessons + rule change", "agent_key": "reviewer"},
+        {"id": "coach", "name": "Coach", "kind": kind(claude), "when": "later",
+         "job": "Explains trades and answers questions in Arabic or English (the AI button).",
+         "reads": ["anything on screen"], "writes": "answers, daily briefing", "agent_key": "coach"},
+    ]
+
+
+@app.get("/api/agents")
+def agents_overview():
+    since = datetime.now(UTC) - timedelta(days=1)
+    with SessionLocal() as db:
+        calls = db.scalars(select(AgentCall).where(AgentCall.at >= since)).all()
+        runs = db.scalars(select(Proposal).order_by(Proposal.id.desc()).limit(12)).all()
+        nos = db.scalars(select(DecisionLog).where(DecisionLog.stage == "score").order_by(DecisionLog.id.desc()).limit(1)).all()
+    stats: dict[str, dict] = {}
+    for c in calls:
+        key = "coach" if c.agent in ("coach", "briefing") else c.agent
+        st = stats.setdefault(key, {"calls": 0, "errors": 0, "ms": 0, "tokens": 0})
+        st["calls"] += 1
+        st["errors"] += 0 if c.ok else 1
+        st["ms"] += c.latency_ms
+        st["tokens"] += c.input_tokens + c.output_tokens
+    roster = _agent_roster()
+    for a in roster:
+        st = stats.get(a.get("agent_key", ""), {})
+        a["calls_24h"] = st.get("calls", 0)
+        a["errors_24h"] = st.get("errors", 0)
+        a["avg_ms"] = round(st["ms"] / st["calls"]) if st.get("calls") else None
+        a["tokens_24h"] = st.get("tokens", 0)
+    return {
+        "team_mode": settings.agent_team, "claude": settings.claude_enabled, "model": settings.claude_model if settings.claude_enabled else None,
+        "agents": roster,
+        "runs": [proposal_out(p) for p in runs],
+        "last_rejected": [{"at": iso(n.at), "symbol": n.symbol, "reason": n.reason, "detail": n.detail} for n in nos],
+    }
+
+
+@app.get("/api/sources")
+def sources():
+    rows = E().extras.sources()
+    rows.append({"name": "Anthropic Claude", "provides": "The AI agents", "status": "connected" if settings.claude_enabled else "missing_key",
+                 "env": "ANTHROPIC_API_KEY", "note": f"{settings.claude_model} · team: {settings.agent_team}" if settings.claude_enabled else "agents run rule-based"})
+    rows.append({"name": "Telegram", "provides": "Phone alerts", "status": "connected" if settings.telegram_bot_token else "missing_key",
+                 "env": "TELEGRAM_BOT_TOKEN", "note": ""})
+    return rows
 
 
 @app.get("/api/reviews")
