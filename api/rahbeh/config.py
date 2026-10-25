@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     # Manager, Reviewer and Coach call Claude. full: every specialist is its own Claude agent (about 2x the cost).
     agent_team: str = "starter"
     hunt_depth: int = 5  # deal finder: how many top-ranked stocks get the full specialist + analyst review
-    keeper_interval_seconds: int = 300
+    keeper_interval_seconds: int = 300  # how often the Claude Position keeper re-checks each open trade (rules run every cycle)
     # Backtester: every trade the AI finds is tested 1,000+ ways before it can be proposed
     backtest_gate: bool = True  # block trades whose setup shows no out-of-sample edge
     backtest_adopt_exits: bool = True  # use the tested stop / target / holding time instead of the Manager's guess
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     backtest_basket: int = 8  # the stock + peers (same sector first)
     backtest_slip_bps: float = 3.0  # per side, on entry and exit
     backtest_min_oos_trades: int = 15
-    backtest_min_oos_exp_r: float = 0.05  # how often the Claude Position keeper re-checks each open trade (rules run every cycle)
+    backtest_min_oos_exp_r: float = 0.05
 
     # Broker and data. Without Alpaca keys the app runs on the built-in market simulator.
     alpaca_api_key: str | None = None
