@@ -189,6 +189,13 @@ class Agents:
         return "claude" if self.client else "heuristic"
 
     # ---- Claude plumbing ------------------------------------------------------------------
+    SPECIALISTS = ("news", "chart", "company", "mood")
+
+    def model_for(self, agent: str) -> str:
+        """The readers only summarise data they are handed, so they use the small fast model; the Analyst, Devil's
+        advocate, Manager, Keeper, Reviewer and Coach keep the main model."""
+        return (self.s.specialist_model or self.s.claude_model) if agent in self.SPECIALISTS else self.s.claude_model
+
     def spend_today(self) -> float:
         """Estimated Claude spend since midnight New York time (cached for 30 s)."""
         cached = getattr(self, "_spend_cache", None)
@@ -239,16 +246,18 @@ class Agents:
         trace: list[dict] = []
         self._local.trace = trace
         started = time.monotonic()
-        rec = AgentCall(agent=agent, symbol=symbol, model=self.s.claude_model, input_tokens=0, output_tokens=0, cache_read_tokens=0)
+        model = self.model_for(agent)
+        rec = AgentCall(agent=agent, symbol=symbol, model=model, input_tokens=0, output_tokens=0, cache_read_tokens=0)
         system = [{"type": "text", "text": SYSTEM},
                   {"type": "text", "text": (role_text or ROLE[agent]) + (SKILL_NOTE if tools else ""), "cache_control": {"type": "ephemeral"}}]
         try:
             for turn in range(MAX_TOOL_TURNS + 1):
                 kwargs: dict = dict(
-                    model=self.s.claude_model, max_tokens=16000, system=system, messages=messages,
-                    output_config={"effort": effort or self.s.agent_effort},
+                    model=model, max_tokens=16000, system=system, messages=messages,
                     betas=["server-side-fallback-2026-07-01"], fallbacks="default",
                 )
+                if "haiku" not in model:  # the small model has no effort setting
+                    kwargs["output_config"] = {"effort": effort or self.s.agent_effort}
                 if tools:
                     kwargs["tools"] = tools
                     if turn == MAX_TOOL_TURNS:

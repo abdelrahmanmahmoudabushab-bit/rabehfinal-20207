@@ -13,11 +13,12 @@ class Settings(BaseSettings):
     # Claude agents. Without a key the agents fall back to transparent heuristics.
     anthropic_api_key: str | None = None
     claude_model: str = "claude-opus-5-5"
+    specialist_model: str = "claude-haiku-5-5"  # News, Chart, Company and Mood readers (AGENT_TEAM=full); "" = use claude_model
     agent_effort: str = "medium"
     max_candidates_per_cycle: int = 3  # caps Claude spend per scan
     agent_cooldown_minutes: int = 30  # a stock the agents rejected isn't re-analyzed for this long, unless new news lands
     # starter: specialists (news, chart, company, mood) are rule-based and only the Analyst, Devil's advocate,
-    # Manager, Reviewer and Coach call Claude. full: every specialist is its own Claude agent (about 2x the cost).
+    # Manager, Position keeper, Reviewer and Coach call Claude. full: every specialist is its own Claude agent (more calls, but on specialist_model).
     agent_team: str = "starter"
     hunt_depth: int = 5  # deal finder: how many top-ranked stocks get the full specialist + analyst review
     keeper_interval_seconds: int = 300  # how often the Claude Position keeper re-checks each open trade (rules run every cycle)
@@ -29,13 +30,19 @@ class Settings(BaseSettings):
     backtest_slip_bps: float = 3.0  # per side, on entry and exit
     backtest_min_oos_trades: int = 15
     backtest_min_oos_exp_r: float = 0.05
+    backtest_min_oos_t: float = 0.5  # out-of-sample t-stat bar; it rises by backtest_deflate x ln(variants the winner was picked from)
+    backtest_deflate: float = 0.1
+    backtest_workers: int = 1  # backtests run in a separate process so they never block the scanner (0 = in-process)
+    backtest_precompute: bool = True  # after the close, test every stock x setup x filter pattern for tomorrow
 
     # Broker and data. Without Alpaca keys the app runs on the built-in market simulator.
     alpaca_api_key: str | None = None
     alpaca_secret_key: str | None = None
     alpaca_paper: bool = True
     alpaca_data_feed: str = "iex"  # "sip" needs a paid Alpaca data plan
-    finnhub_api_key: str | None = None  # second price source + news
+    alpaca_stream: bool = True  # websocket prices (live mode only); polling stays as the fallback
+    stream_move_pct: float = 1.0  # a stock moving this much in a minute wakes the scanner immediately
+    finnhub_api_key: str | None = None  # second price source + earnings dates, analyst ratings, economic calendar (news comes from Alpaca)
     fmp_api_key: str | None = None  # fundamentals, economic calendar fallback
     fred_api_key: str | None = None  # VIX, Fed funds, 10-year yield, oil (free key)
     sec_user_agent: str = "Rahbeh research admin@example.com"  # SEC asks for a contact email here
@@ -49,7 +56,8 @@ class Settings(BaseSettings):
     demo_always_open: bool = True  # demo market trades around the clock
     watchlist: str = ""  # comma-separated; empty = built-in universe
 
-    max_entry_slip_bps: float = 10.0  # entries are limit orders: never pay more than this above the planned price
+    max_plan_drift_pct: float = 0.4  # an idea expires when the live price is already this far above its planned entry
+    max_entry_slip_bps: float = 10.0  # the entry limit order sits this far above the live price at the moment of the order
     daily_ai_budget_usd: float = 25.0  # past this, agents fall back to free rules until tomorrow (0 = no cap)
 
     cors_origins: str = "http://localhost:3000"

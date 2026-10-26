@@ -425,6 +425,7 @@ export interface Usage {
   input_tokens_24h: number;
   output_tokens_24h: number;
   cache_read_tokens_24h: number;
+  cache_saved_24h?: number;
   est_cost_24h: number;
   recent: { at: string; agent: string; symbol: string | null; model: string; in: number; out: number; ms: number; ok: boolean; error: string | null }[];
 }
@@ -497,6 +498,8 @@ export interface Backtest {
   basket?: string[];
   ms?: number;
   source?: string;
+  regime?: { current: "trending" | "choppy" | null; by_regime: Record<string, { n: number; exp_r: number; win: number }> };
+  selection?: { candidates?: number; oos_t?: number; t_bar?: number; is_t?: number; luck_bar?: number };
   tuned_plan?: { entry: number; stop: number; target: number; max_hold_min: number | null; trail: string; expected_r: number; variant: string };
 }
 
@@ -527,4 +530,32 @@ export interface LiveVsBacktest {
   overall: { trades: number; expected_r?: number; realized_r?: number };
   by_setup: Record<string, { trades: number; expected_r: number; realized_r: number }>;
   untested_trades: number;
+}
+
+export interface AgentReport {
+  days: number;
+  agents: { agent: string; calls: number; errors: number; cost: number; avg_ms: number; models: string[] }[];
+  blocked_by: { stage: string; count: number }[];
+  closed_trades: number;
+  by_analyst_score: { bucket: string; trades: number; avg_r: number | null }[];
+  by_devil_severity: { bucket: string; trades: number; avg_r: number | null }[];
+  note: string;
+}
+
+export interface SetupHealth {
+  setups: Record<string, { trades: number; live_r: number; expected_r: number | null; status: "ok" | "cut" | "paused"; multiplier: number }>;
+  regime: "trending" | "choppy" | null;
+}
+
+export interface PrecomputeStatus {
+  status?: "running" | "done" | "failed";
+  done?: number;
+  total?: number;
+  regime: "trending" | "choppy" | null;
+  cached_verdicts: number;
+  workers: number;
+  scheduled: boolean;
+  seconds?: number;
+  note?: string;
+  error?: string;
 }

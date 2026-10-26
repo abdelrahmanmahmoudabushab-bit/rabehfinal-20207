@@ -9,8 +9,7 @@ import { ProposalCard } from "@/components/app/proposal";
 import { useApi, type Proposal, type Settings } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
-const MODE_HELP = {
-  research: "Research mode: the agents explain ideas; you place any trade yourself in your own broker app.",
+const MODE_HELP: Record<"copilot" | "autopilot", string> = {
   copilot: "Copilot mode: every trade waits for your one-tap approval. Ideas expire after 15 minutes because prices move.",
   autopilot: "Autopilot mode: approved ideas are executed automatically, inside your limits. You can still pull the kill switch any time.",
 };
@@ -24,7 +23,7 @@ export default function IdeasPage() {
 
   return (
     <>
-      <PageHeader title={t("ideas")} description={settings ? MODE_HELP[settings.mode] : undefined} />
+      <PageHeader title={t("ideas")} description={settings ? (settings.mode === "research" ? t("researchHelp") : MODE_HELP[settings.mode]) : undefined} />
       <Tabs defaultValue="open">
         <TabsList>
           <TabsTrigger value="open">Open {open?.length ? `(${open.length})` : ""}</TabsTrigger>

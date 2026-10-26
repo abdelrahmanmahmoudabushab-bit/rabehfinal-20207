@@ -10,13 +10,14 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..db import Proposal, SessionLocal
-from ..market.universe import FUNDAMENTALS, sector_of
-from ..pipeline import halal, risk
+from ..market.universe import FUNDAMENTALS
+from ..pipeline import checks, halal, risk
 from . import skills
 
 if TYPE_CHECKING:
@@ -114,6 +115,14 @@ def _hunt(e: Engine, h: Hunt) -> None:
             continue
         if r["trend"] == "down" or r["news_sentiment"] < -0.15:
             continue
+        if e._cooling(sym):
+            h.step("scanner", "The agents rejected it recently — cooling down, skipped.", sym, ok=False)
+            continue
+        dc = checks.check_data(e.market.minute_bars(sym, 240), e.market.quote(sym), e.market.second_quote(sym), e.market.now())
+        if not dc.ok:
+            h.step("data_checks", "Bad data, skipped: " + "; ".join(dc.problems), sym,
+                   skills_used=[{"skill": "get_quote", "summary": "failed"}], ok=False)
+            continue
         if halal_only:
             hr = halal.screen(e.market.fundamentals(sym))
             if not hr.passes:
@@ -131,21 +140,31 @@ def _hunt(e: Engine, h: Hunt) -> None:
     # 3. Specialists + Analyst on each shortlisted stock
     lessons = e._latest_lessons_safe()
     contexts: dict[str, dict] = {}
-    for sym in shortlist:
+
+    def analyse(sym: str):  # one worker thread per stock: the thread-local skill trace must be read in the same thread
         ctx = e.stock_context(sym)
         if not ctx:
-            continue
+            return None
         ctx["lessons_from_reviewer"] = lessons
         team = e.agents.team(ctx)
         team["mood"] = {**e.mood_report, "level": m.level}
         ctx["team_reports"] = team
-        for k, label in (("news", "news"), ("chart", "chart"), ("company", "company")):
-            rpt = team[k]
-            h.step(label, rpt["summary"], sym, by=rpt["by"], skills_used=rpt.get("skills"),
-                   ok=not (k == "company" and rpt.get("earnings_risk")))
         rep, src = e.agents.analyst(ctx)
+        trace = e.agents.last_trace()
         e.record_shadow(sym, ctx, rep, src, threshold)
-        h.step("analyst", f"Score {rep.score}/100 — {rep.thesis}", sym, by=src, skills_used=e.agents.last_trace(),
+        return sym, ctx, team, rep, src, trace
+
+    with ThreadPoolExecutor(max_workers=max(1, len(shortlist))) as pool:
+        results = list(pool.map(analyse, shortlist))  # runs the stocks side by side, results stay in rank order
+    for res in results:
+        if res is None:
+            continue
+        sym, ctx, team, rep, src, trace = res
+        for k in ("news", "chart", "company"):
+            rpt = team[k]
+            h.step(k, rpt["summary"], sym, by=rpt["by"], skills_used=rpt.get("skills"),
+                   ok=not (k == "company" and rpt.get("earnings_risk")))
+        h.step("analyst", f"Score {rep.score}/100 — {rep.thesis}", sym, by=src, skills_used=trace,
                ok=rep.direction == "long" and rep.score >= threshold)
         contexts[sym] = ctx
         h.candidates.append({"symbol": sym, "name": FUNDAMENTALS[sym].name if sym in FUNDAMENTALS else sym, "score": rep.score,
@@ -189,9 +208,10 @@ def _hunt(e: Engine, h: Hunt) -> None:
                    + f" (Manager had {mg.stop:.2f} / {mg.target:.2f}).", sym, ok=True)
         with SessionLocal() as db:
             u = e.settings_row(db)
-            days = ctx["earnings"]["days_until"]
-            rd = risk.evaluate(risk.TradeRequest(sym, sector_of(sym), entry, stop, target, days), e.risk_context(db, u), e.limits(u))
-            h.step("risk", "Allowed: up to " + f"{rd.qty} shares, risking ${rd.risk_amount:,.0f}" if rd.approved else f"Blocked: {rd.reason}",
+            treq = e.trade_request(db, sym, entry, stop, target, ctx["earnings"], btr)
+            sm, sn = treq.size_multiplier, treq.size_note
+            rd = risk.evaluate(treq, e.risk_context(db, u), e.limits(u))
+            h.step("risk", "Allowed: up to " + f"{rd.qty} shares, risking ${rd.risk_amount:,.0f}" + (f" ({sn})" if sm < 1 else "") if rd.approved else f"Blocked: {rd.reason}",
                    sym, ok=rd.approved)
             if not rd.approved:
                 continue

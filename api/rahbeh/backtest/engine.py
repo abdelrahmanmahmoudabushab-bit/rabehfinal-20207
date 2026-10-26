@@ -16,8 +16,12 @@ Rules that keep it honest:
 
 from __future__ import annotations
 
+import math
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from itertools import product
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -55,6 +59,7 @@ class Series:
     v: np.ndarray
     day: np.ndarray  # session index (0, 1, 2 ...)
     bod: np.ndarray  # bar of day (0 = 09:30)
+    regime: np.ndarray | None = None  # per bar: 1 trending market, 0 choppy, -1 unknown (see session_regimes)
 
 
 @dataclass
@@ -206,6 +211,68 @@ def simulate(s: Series, ind: Indicators, sig_idx: np.ndarray, slip_bps: float) -
     return {"r": r_out, "pct": pct_out}
 
 
+ET = ZoneInfo("America/New_York")
+REGIME_NAMES = {1: "trending", 0: "choppy"}
+
+
+def session_regimes(spy: Series, today=None, window: int = 5, min_days: int = 3, min_history: int = 5) -> tuple[dict, int | None]:
+    """Label every session trending (1) or choppy (0) using only what was known BEFORE that session. A session's
+    efficiency ratio is its net move divided by the total distance the 5-minute closes travelled (1 = a straight
+    line, near 0 = going nowhere). Its label compares the average ratio of the previous `window` sessions with the
+    median of all such averages seen up to that point (an expanding median, so later data never changes an earlier
+    label). Sessions without enough history stay unlabeled. Returns ({date: label}, current label)."""
+    days = np.unique(spy.day)
+    dates, er = [], []
+    for d in days:
+        idx = np.flatnonzero(spy.day == d)
+        c = spy.c[idx]
+        path = abs(c[0] - spy.o[idx[0]]) + np.abs(np.diff(c)).sum()
+        er.append(abs(c[-1] - spy.o[idx[0]]) / path if path > 0 else 0.0)
+        dates.append(datetime.fromtimestamp(int(spy.t[idx[0]]), ET).date())
+    er = np.array(er)
+    roll = np.full(len(er), np.nan)
+    for i in range(min_days, len(er)):
+        roll[i] = er[max(0, i - window):i].mean()
+    labels: dict = {}
+    for i in range(len(er)):
+        seen = roll[:i][~np.isnan(roll[:i])]  # averages known before session i
+        if np.isnan(roll[i]) or len(seen) < min_history:
+            continue
+        labels[dates[i]] = int(roll[i] >= np.median(seen))
+    prior = [i for i in range(len(er)) if today is None or dates[i] < today]
+    current = None
+    if len(prior) >= min_days:
+        known = roll[[i for i in prior if not np.isnan(roll[i])]]
+        if len(known) >= min_history:
+            current = int(er[prior[-window:]].mean() >= np.median(known))
+    return labels, current
+
+
+def tag_regime(s: Series, labels: dict) -> None:
+    """Attach the regime label of each bar's session to the series."""
+    ud, first = np.unique(s.day, return_index=True)
+    by_day = {int(d): labels.get(datetime.fromtimestamp(int(s.t[i]), ET).date(), -1) for d, i in zip(ud, first, strict=True)}
+    s.regime = np.array([by_day[int(d)] for d in s.day], dtype=np.int8)
+
+
+_PREP: OrderedDict = OrderedDict()  # (symbol, bars, last bar, setup, slip) -> prepared signals; keeps repeated runs cheap
+_PREP_MAX = 600
+
+
+def _prepared(s: Series, ind: Indicators, setup: str, slip_bps: float):
+    key = (s.symbol, len(s.t), int(s.t[-1]) if len(s.t) else 0, setup, slip_bps)
+    hit = _PREP.get(key)
+    if hit is not None:
+        _PREP.move_to_end(key)
+        return hit
+    idx = np.flatnonzero(setup_signals(s, ind, setup))
+    out = (idx, simulate(s, ind, idx, slip_bps))
+    _PREP[key] = out
+    if len(_PREP) > _PREP_MAX:
+        _PREP.popitem(last=False)
+    return out
+
+
 @dataclass
 class Variant:
     setup: str
@@ -261,6 +328,9 @@ class Criteria:
     min_is_trades: int = 20
     min_oos_exp_r: float = 0.05
     max_p_loss: float = 0.3
+    min_oos_t: float = 0.5  # out-of-sample t-stat bar before any selection penalty
+    deflate: float = 0.1  # the bar rises by this x ln(variants the winner was picked from)
+    min_regime_trades: int = 10
 
 
 @dataclass
@@ -284,13 +354,16 @@ class Result:
     monte_carlo: dict
     verdict: str  # edge | no_edge | not_enough_data
     reasons: list[str] = field(default_factory=list)
+    regime: dict = field(default_factory=dict)  # {current, by_regime} for the chosen variant
+    selection: dict = field(default_factory=dict)  # how many variants the winner was picked from and the bar it faced
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
 def run(series: list[Series], setups: list[str] | None = None, slip_bps: float = 3.0, oos_frac: float = 0.3,
-        applicable: dict | None = None, criteria: Criteria | None = None, top: int = 25) -> Result:
+        applicable: dict | None = None, criteria: Criteria | None = None, top: int = 25,
+        current_regime: int | None = None) -> Result:
     """Backtest every variant across every stock. `applicable` limits which filter variants count as
     candidates for selection (e.g. only filters the live trade actually passes)."""
     setups = setups or list(SETUPS)
@@ -303,22 +376,23 @@ def run(series: list[Series], setups: list[str] | None = None, slip_bps: float =
     per_setup: dict[str, dict] = {}
     inds = [(s, indicators(s)) for s in series]
     for setup in setups:
-        R, P, T, RV, RS = [], [], [], [], []
+        R, P, T, RV, RS, RG = [], [], [], [], [], []
         for s, ind in inds:
-            idx = np.flatnonzero(setup_signals(s, ind, setup))
-            sim = simulate(s, ind, idx, slip_bps)
+            idx, sim = _prepared(s, ind, setup, slip_bps)
             R.append(sim["r"])
             P.append(sim["pct"])
             T.append(s.t[idx])
             RV.append(ind.rvol[idx])
             RS.append(ind.rsi[idx])
+            RG.append(s.regime[idx] if s.regime is not None else np.full(len(idx), -1, dtype=np.int8))
         r = np.concatenate(R) if R else np.zeros((0, len(EXITS)))
         pct = np.concatenate(P) if P else np.zeros((0, len(EXITS)))
         t = np.concatenate(T) if T else np.zeros(0)
         rv = np.concatenate(RV) if RV else np.zeros(0)
         rs = np.concatenate(RS) if RS else np.zeros(0)
+        rg = np.concatenate(RG) if RG else np.zeros(0, dtype=np.int8)
         order = np.argsort(t, kind="stable")
-        r, pct, t, rv, rs = r[order], pct[order], t[order], rv[order], rs[order]
+        r, pct, t, rv, rs, rg = r[order], pct[order], t[order], rv[order], rs[order], rg[order]
         total_signals += len(t)
         per_setup[setup] = {"setup": setup, "signals": int(len(t)), "description": SETUPS[setup]}
         for f_i, (min_rvol, rsi_cap) in enumerate(FILTERS):
@@ -334,7 +408,7 @@ def run(series: list[Series], setups: list[str] | None = None, slip_bps: float =
                     "oos": {kk: float(vv[e_i]) for kk, vv in st_oos.items()},
                 })
                 trade_blocks[(setup, f_i, e_i)] = {"m": m, "e": e_i}
-            per_setup[setup].setdefault("_data", (r, pct, t))
+            per_setup[setup].setdefault("_data", (r, pct, t, rg))
 
     variants = len(rows)
     oos_exp = np.array([x["oos"]["exp_r"] for x in rows]) if rows else np.zeros(0)
@@ -350,16 +424,18 @@ def run(series: list[Series], setups: list[str] | None = None, slip_bps: float =
     best = candidates[0] if candidates else None
 
     mc: dict = {"runs": 0}
+    regime: dict = {"current": REGIME_NAMES.get(current_regime) if current_regime is not None else None, "by_regime": {}}
+    selection: dict = {}
     equity: list[dict] = []
     reasons: list[str] = []
     verdict = "not_enough_data"
     if best:
         v = best["variant"]
-        r_all, pct_all, t_all = per_setup[v["setup"]]["_data"]
+        r_all, pct_all, t_all, rg_all = per_setup[v["setup"]]["_data"]
         f_i = FILTERS.index((v["min_rvol"], v["rsi_cap"]))
         e_i = EXITS.index((v["stop_atr"], v["target_r"], v["trail"], v["max_hold"]))
         m = trade_blocks[(v["setup"], f_i, e_i)]["m"]
-        rr, tt = r_all[m, e_i], t_all[m]
+        rr, tt, rgm = r_all[m, e_i], t_all[m], rg_all[m]
         cum = np.cumsum(rr)
         equity = [{"t": int(a), "cum_r": round(float(b), 3), "oos": bool(a >= split)} for a, b in zip(tt, cum)]
         oos_r = rr[tt >= split]
@@ -371,6 +447,22 @@ def run(series: list[Series], setups: list[str] | None = None, slip_bps: float =
             reasons.append(f"out-of-sample expectancy {o['exp_r']:+.2f}R (need ≥ {crit.min_oos_exp_r:+.2f}R)")
         if best["is"]["exp_r"] <= 0:
             reasons.append("even the best in-sample variant loses money")
+        k = len(candidates)  # variants the winner was picked from
+        t_bar = crit.min_oos_t + crit.deflate * math.log(max(k, 1))
+        selection = {"candidates": k, "oos_t": round(o["t"], 2), "t_bar": round(t_bar, 2), "is_t": round(best["is"]["t"], 2),
+                     "luck_bar": round(math.sqrt(2 * math.log(max(k, 2))), 2)}
+        if o["n"] >= crit.min_oos_trades and o["t"] < t_bar:
+            reasons.append(f"out-of-sample t-stat {o['t']:.2f} is below the {t_bar:.2f} needed after picking the best of {k:,} variants")
+        regime = {"current": REGIME_NAMES.get(current_regime) if current_regime is not None else None, "by_regime": {}}
+        for code, name in REGIME_NAMES.items():
+            sel = rgm == code
+            if sel.any():
+                regime["by_regime"][name] = {"n": int(sel.sum()), "exp_r": round(float(rr[sel].mean()), 3),
+                                             "win": round(float((rr[sel] > 0).mean()), 3)}
+        cur = regime["by_regime"].get(regime["current"]) if regime["current"] else None
+        if cur and cur["n"] >= crit.min_regime_trades and cur["exp_r"] <= 0:
+            reasons.append(f"this variant lost money in {regime['current']} markets ({cur['exp_r']:+.2f}R over {cur['n']} trades) "
+                           f"and the market is {regime['current']} now")
         if mc.get("runs") and mc["p_loss"] > crit.max_p_loss:
             reasons.append(f"{mc['p_loss']:.0%} chance of a losing run in Monte Carlo (max {crit.max_p_loss:.0%})")
         if o["n"] < crit.min_oos_trades:
@@ -408,7 +500,7 @@ def run(series: list[Series], setups: list[str] | None = None, slip_bps: float =
         variants_tested=variants, signals=total_signals, split_at=split, slip_bps=slip_bps, best=best,
         leaderboard=leaderboard, share_oos_positive=round(share_pos, 3), median_oos_exp_r=round(med_oos, 4),
         is_oos_rank_corr=round(corr, 3), heatmap=heat, setup_summary=list(per_setup.values()), equity=equity,
-        monte_carlo=mc, verdict=verdict, reasons=reasons,
+        monte_carlo=mc, verdict=verdict, reasons=reasons, regime=regime, selection=selection,
     )
 
 
@@ -444,4 +536,5 @@ def setup_signals_raw(s: Series, ind: Indicators, setup: str) -> np.ndarray:
     if setup == "momentum":
         return up & (ind.ret6 > 0.006) & (c > ind.vwap)
     orh = np.nan_to_num(ind.orh, nan=np.inf)
-    return c > orh
+    prev_c = np.concatenate([[np.inf], c[:-1]])
+    return (c > orh) & (prev_c <= orh)  # the FIRST close above the opening range, like the backtest

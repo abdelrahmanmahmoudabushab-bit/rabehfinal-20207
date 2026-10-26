@@ -6,6 +6,7 @@ It also injects rare data faults (stale prints, a bad second-source price) so th
 checks visibly do their job.
 """
 
+import os
 import random
 import threading
 import uuid
@@ -44,8 +45,11 @@ class SimMarket:
         self._rng = random.Random(seed)
         self._lock = threading.RLock()
         self.always_open = always_open
-        start = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=history_minutes)
-        self._clock = start
+        # SIM_NOW (ISO, UTC) pins the simulated clock so tests give the same answer on any day and at any hour
+        pinned = os.environ.get("SIM_NOW")
+        now = datetime.fromisoformat(pinned).astimezone(UTC) if pinned else datetime.now(UTC)
+        self._now0 = now  # where 'today' is for the daily candles (they used the real date even when the clock was pinned)
+        self._clock = now.replace(second=0, microsecond=0) - timedelta(minutes=history_minutes)
         self._bars: dict[str, list[Bar]] = {}
         self._daily: dict[str, list[Bar]] = {}
         self._drift: dict[str, tuple[float, int]] = {}  # symbol -> (per-minute drift, minutes left)
@@ -54,7 +58,7 @@ class SimMarket:
         for sym in [*SYMBOLS, BENCHMARK]:
             p = START_PRICES[sym]
             self._daily[sym] = self._make_daily(p)
-            self._bars[sym] = [Bar(start, p, p, p, p, self._base_volume(sym))]
+            self._bars[sym] = [Bar(self._clock, p, p, p, p, self._base_volume(sym))]
         for _ in range(history_minutes):
             self.tick()
 
@@ -69,7 +73,7 @@ class SimMarket:
         for _ in range(days - 1):
             prices.append(prices[-1] / (1 + self._rng.gauss(0.0004, 0.017)))
         prices.reverse()
-        yesterday = datetime.now(UTC).replace(hour=20, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        yesterday = self._now0.replace(hour=20, minute=0, second=0, microsecond=0) - timedelta(days=1)
         out = []
         for i, c in enumerate(prices):
             o = c * (1 + self._rng.gauss(0, 0.006))

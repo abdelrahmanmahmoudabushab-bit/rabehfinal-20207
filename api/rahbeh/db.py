@@ -123,6 +123,7 @@ class Trade(Base):
     broker_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mode: Mapped[str] = mapped_column(String(16), default="copilot")
     notes: Mapped[list] = mapped_column(JSON, default=list)  # stop raises etc.
+    sim: Mapped[bool] = mapped_column(Boolean, default=False)  # simulated (demo) trade: never counts toward unlocking live Autopilot
     origin: Mapped[str] = mapped_column(String(16), default="scanner")  # scanner | deal_finder | chart
     peak_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     keeper_log: Mapped[list] = mapped_column(JSON, default=list)  # Position keeper verdicts, newest last

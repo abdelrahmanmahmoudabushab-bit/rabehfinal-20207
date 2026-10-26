@@ -102,7 +102,7 @@ export default function PortfolioPage() {
       <Card className="mt-4">
         <CardHeader>
           <CardTitle>{t("openPositions")}</CardTitle>
-          <CardDescription>Stops and targets are held at the broker. Stops rise as trades work; everything closes by 15:50 ET.</CardDescription>
+          <CardDescription>{t("portfolioDesc")}</CardDescription>
         </CardHeader>
         <CardContent>
           {data?.positions.length ? <PositionsTable rows={data.positions} /> : <Empty icon={<Radar />}>{t("noPositions")}</Empty>}

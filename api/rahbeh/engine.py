@@ -47,6 +47,7 @@ class Engine:
         self.extras: Extras = extras or (SimExtras(market) if s.demo else LiveExtras(s))
         self.agents.bind(self)
         self.backtester = Backtester(s, market.universe())
+        self.kill_failed: list[str] = []  # positions the last kill switch could not close
         self.hunts: dict = {}  # deal finder runs (team/hunter.py), kept in memory
         self.latest_hunt_id: str | None = None
         self._hunt_lock = threading.Lock()
@@ -123,13 +124,13 @@ class Engine:
             mood_multiplier=self.mood.risk_multiplier if self.mood else 1.0,
             daytrades_5d=max(acct.daytrade_count, self.daytrades_5d(db)),
             session_close=self.session_close(),
-            swing=u.strategy == "swing",
+            swing=u.strategy == "swing", require_earnings=not self.s.demo,
         )
 
     def earnings_ctx(self, symbol: str) -> dict:
         e = self.extras.earnings(symbol)
         return {"next_date": e.next_date, "next_hour": e.next_hour, "eps_estimate": e.eps_estimate,
-                "days_until": e.days_until(self.market.now().astimezone(ET).date()), "history": e.history}
+                "days_until": e.days_until(self.market.now().astimezone(ET).date()), "history": e.history, "known": e.known}
 
     def ratings_ctx(self, symbol: str) -> dict | None:
         r = self.extras.ratings(symbol)
@@ -264,6 +265,8 @@ class Engine:
                 bars = self.market.minute_bars(sym, 240)
                 # 1. Data OK?
                 dc = checks.check_data(bars, self.market.quote(sym), self.market.second_quote(sym), now)
+                if dc.ok and dc.warnings and not self.s.demo:  # e.g. only one price source: tell the user once, not every scan
+                    self.alert(db, "warn", "Data warning", "; ".join(dc.warnings), dedupe_key="datawarn:" + ";".join(dc.warnings))
                 if not dc.ok:
                     summary["data_bad"] += 1
                     self.paused[sym] = now + PAUSE_AFTER_BAD_DATA
@@ -338,7 +341,7 @@ class Engine:
             return False
         entry, stop, target, tuned = self.tuned_levels(mg, btr)
         # 8. Risk engine: within limits?
-        req = risk.TradeRequest(sym, sector_of(sym), entry, stop, target, ctx["earnings"]["days_until"])
+        req = self.trade_request(db, sym, entry, stop, target, ctx["earnings"], btr)
         rd = risk.evaluate(req, self.risk_context(db, u), self.limits(u))
         prop = Proposal(
             symbol=sym, score=rep.score, entry=entry, stop=stop, target=target, qty=rd.qty,
@@ -359,7 +362,7 @@ class Engine:
             self.alert(db, "info", f"Idea: {sym} (score {rep.score})", rep.thesis)
         elif u.mode == "copilot":
             prop.status = "pending"
-            self.alert(db, "info", f"Trade ready for approval: {sym}", f"Buy {rd.qty} @ ~{mg.entry:.2f}, stop {mg.stop:.2f}, target {mg.target:.2f}")
+            self.alert(db, "info", f"Trade ready for approval: {sym}", f"Buy up to {rd.qty} @ ~{entry:.2f}, stop {stop:.2f}, target {target:.2f}")
         else:
             self.execute(db, prop, u)
         return True
@@ -391,10 +394,10 @@ class Engine:
                 dv, _ = self.agents.devil(ctx, rep)
                 mg, _ = self.agents.manager(ctx, rep, dv)
                 self._analysis_cache[sym] = (time.monotonic(), (rep, dv, mg, src, team))
-            days = ctx["earnings"]["days_until"]
             btr = self.backtest_trade(sym)
+            days, earn_known = ctx["earnings"]["days_until"], ctx["earnings"].get("known", True)
             entry, stop, target, tuned = self.tuned_levels(mg, btr)
-            rd = risk.evaluate(risk.TradeRequest(sym, sector_of(sym), entry, stop, target, days), self.risk_context(db, u), self.limits(u))
+            rd = risk.evaluate(self.trade_request(db, sym, entry, stop, target, ctx["earnings"], btr), self.risk_context(db, u), self.limits(u))
             gates = [
                 {"name": "Data OK", "passed": dc.ok, "detail": "; ".join(dc.problems) or "clean"},
                 {"name": "Halal", "passed": hr.passes or not u.halal_only,
@@ -404,8 +407,9 @@ class Engine:
                 {"name": "Objection answered", "passed": mg.objection_answered and mg.decision == "trade", "detail": dv.objection},
                 {"name": "Market mood", "passed": not self.mood or self.mood.level != "stormy",
                  "detail": f"{self.mood.level}: {'; '.join(self.mood.reasons)}" if self.mood else "not assessed yet"},
-                {"name": "Earnings", "passed": days is None or not 0 <= days <= risk.EARNINGS_BLACKOUT_DAYS,
-                 "detail": f"next report in {days} day(s)" if days is not None else "date unknown"},
+                {"name": "Earnings", "passed": (earn_known or self.s.demo) and (days is None or not 0 <= days <= risk.EARNINGS_BLACKOUT_DAYS),
+                 "detail": f"next report in {days} day(s)" if days is not None
+                 else "no report in the next 100 days" if earn_known else "date unknown — not checked"},
                 {"name": "Backtest", "passed": self.backtest_ok(btr), "detail": f"{btr.get('verdict')}: {self.backtest_brief(btr)}"},
                 {"name": "Risk engine", "passed": rd.approved, "detail": rd.reason},
             ]
@@ -463,6 +467,66 @@ class Engine:
         except Exception as e:
             log.exception("backtest failed for %s", symbol)
             return {"verdict": "error", "reasons": [f"backtest failed: {e}"], "variants_tested": 0}
+
+    # ---- position size: tested edge, volatility and how the setup is doing live -----------------------
+    def setup_health(self, db) -> dict[str, dict]:
+        """Per setup, how live trades from the last 30 days compare with what their backtests promised.
+        Cut size to half when a setup loses on average, and pause it when it keeps losing."""
+        since = self.market.now() - timedelta(days=30)
+        rows = db.scalars(select(Trade).where(Trade.closed_at.is_not(None), Trade.closed_at >= since,
+                                              Trade.exit_reason != "demo restart")).all()
+        by: dict[str, list[Trade]] = {}
+        for t in rows:
+            setup = (t.plan or {}).get("setup")
+            if setup and t.r_multiple is not None:
+                by.setdefault(setup, []).append(t)
+        out = {}
+        for setup, ts in by.items():
+            n = len(ts)
+            mean_r = sum(t.r_multiple for t in ts) / n
+            exp = [t.plan["expected_r"] for t in ts if t.plan.get("expected_r") is not None]
+            status, mult = "ok", 1.0
+            if n >= 15 and mean_r <= -0.2:
+                status, mult = "paused", 0.0
+            elif n >= 8 and mean_r < 0:
+                status, mult = "cut", 0.5
+            out[setup] = {"trades": n, "live_r": round(mean_r, 3), "expected_r": round(sum(exp) / len(exp), 3) if exp else None,
+                          "status": status, "multiplier": mult}
+        return out
+
+    def size_multiplier(self, db, btr: dict) -> tuple[float, str]:
+        """Scales the 1% risk DOWN (never up): weaker tested edge, a volatile stock, or a setup that is losing live
+        all mean a smaller position. Returns (multiplier, plain-words reason)."""
+        notes, m = [], 1.0
+        best = btr.get("best") or {}
+        exp_r = (best.get("oos") or {}).get("exp_r")
+        if btr.get("verdict") == "edge" and exp_r is not None:
+            edge_m = min(1.0, max(0.4, exp_r / 0.30))
+            if edge_m < 1:
+                notes.append(f"tested edge {exp_r:+.2f}R, so x{edge_m:.2f}")
+            m *= edge_m
+        else:
+            m *= 0.6
+            notes.append("no tested edge, so x0.60")
+        live = btr.get("live") or {}
+        if live.get("atr") and live.get("price"):
+            atr_pct = live["atr"] / live["price"]
+            vol_m = 0.7 if atr_pct > 0.03 else 0.85 if atr_pct > 0.02 else 1.0
+            if vol_m < 1:
+                notes.append(f"volatile stock (ATR {atr_pct:.1%}), so x{vol_m:.2f}")
+            m *= vol_m
+        h = self.setup_health(db).get(btr.get("setup") or "")
+        if h and h["status"] != "ok":
+            notes.append(f"{btr['setup']} is {'paused' if h['status'] == 'paused' else 'losing live'}: "
+                         f"{h['live_r']:+.2f}R over {h['trades']} trades, so x{h['multiplier']:.2f}")
+            m *= h["multiplier"]
+            self.alert(db, "warn", f"Setup {btr['setup']} {h['status']}", notes[-1], dedupe_key=f"setup:{btr['setup']}:{h['status']}")
+        return round(m, 3), "; ".join(notes) or "full size"
+
+    def trade_request(self, db, sym: str, entry: float, stop: float, target: float, earnings: dict, btr: dict) -> risk.TradeRequest:
+        """Everything the risk engine needs about one trade, including the size reduction and whether earnings were checked."""
+        sm, sn = self.size_multiplier(db, btr)
+        return risk.TradeRequest(sym, sector_of(sym), entry, stop, target, earnings["days_until"], earnings.get("known", True), sm, sn)
 
     def backtest_ok(self, btr: dict) -> bool:
         return not self.s.backtest_gate or btr.get("verdict") == "edge"
@@ -533,14 +597,14 @@ class Engine:
             q = self.market.quote(prop.symbol)
             if not q:
                 return False, "no live price"
+            slip = self.s.max_entry_slip_bps / 10_000
             drift = q.price / prop.entry - 1
-            if drift > 0.004:
-                prop.status, prop.status_reason = "expired", f"price ran {drift:.2%} past the planned entry"
+            if drift > self.s.max_plan_drift_pct / 100:
+                prop.status, prop.status_reason = "expired", f"price ran {drift:.2%} past the planned entry (limit {self.s.max_plan_drift_pct}%)"
                 return False, prop.status_reason
-            # keep the stop/target distances, re-anchored to the live price
+            # risk is re-checked at the live price; the stop and target stay at the planned absolute prices
             entry, stop, target = q.price, prop.stop, prop.target
-            days = self.earnings_ctx(prop.symbol)["days_until"]
-            rd = risk.evaluate(risk.TradeRequest(prop.symbol, sector_of(prop.symbol), entry, stop, target, days),
+            rd = risk.evaluate(self.trade_request(db, prop.symbol, entry, stop, target, self.earnings_ctx(prop.symbol), prop.backtest or {}),
                                self.risk_context(db, u), self.limits(u))
             prop.risk_checks = rd.as_list()
             if not rd.approved:
@@ -552,7 +616,7 @@ class Engine:
             size = qty if qty is not None else rd.qty
             if size < 1:
                 return False, "quantity must be at least 1"
-            limit = round(entry * (1 + self.s.max_entry_slip_bps / 10_000), 2)  # never chase more than this
+            limit = round(entry * (1 + slip), 2)  # never pay more than this above the live price at the moment of the order
             res = self.broker.submit_bracket(prop.symbol, size, stop, target, entry, limit_price=limit)
             if not res.ok:
                 prop.status, prop.status_reason = "blocked", res.message
@@ -563,7 +627,7 @@ class Engine:
             prop.status, prop.qty = "executed", size
             db.add(Trade(
                 proposal_id=prop.id, symbol=prop.symbol, sector=sector_of(prop.symbol), qty=size, entry_price=fill,
-                initial_stop=stop, stop=stop, target=target, broker_order_id=res.order_id, mode=u.mode,
+                initial_stop=stop, stop=stop, target=target, broker_order_id=res.order_id, mode=u.mode, sim=self.s.demo,
                 opened_at=self.market.now(), notes=[], origin=origin, peak_price=fill, keeper_log=[],
                 plan=_trade_plan(prop),
             ))
@@ -762,13 +826,23 @@ class Engine:
             if on:
                 for p in db.scalars(select(Proposal).where(Proposal.status.in_(["pending", "idea"]))).all():
                     p.status, p.status_reason = "rejected", "kill switch"
-                for t in self.open_trades(db):
-                    res = self.broker.close(t.symbol)
-                    q = self.market.quote(t.symbol)
-                    if res.ok:
-                        self._close_trade(db, t, res.fill_price or (q.price if q else t.entry_price), "kill switch")
-                self.log(db, "kill_switch", "alert", "kill switch ON: all positions closed, trading stopped")
-                self.alert(db, "critical", "Kill switch ON", "All positions closed. No new trades until you turn it off.")
+                tracked = {t.symbol: t for t in self.open_trades(db)}
+                failed: list[str] = []
+                for sym in {*tracked, *(p.symbol for p in self.broker.positions())}:  # every position the broker holds, ours or not
+                    res = self.broker.close(sym)
+                    q = self.market.quote(sym)
+                    if not res.ok:
+                        failed.append(f"{sym}: {res.message}")
+                    elif sym in tracked:
+                        self._close_trade(db, tracked[sym], res.fill_price or (q.price if q else tracked[sym].entry_price), "kill switch")
+                self.kill_failed = failed
+                if failed:
+                    msg = "COULD NOT CLOSE: " + "; ".join(failed) + ". Close these in your broker app now."
+                    self.log(db, "kill_switch", "alert", f"kill switch ON, trading stopped. {msg}")
+                    self.alert(db, "critical", "Kill switch ON — some positions are still open", msg)
+                else:
+                    self.log(db, "kill_switch", "alert", "kill switch ON: all positions closed, trading stopped")
+                    self.alert(db, "critical", "Kill switch ON", "All positions closed. No new trades until you turn it off.")
             else:
                 self.log(db, "kill_switch", "info", "kill switch off: trading resumes")
             db.commit()
@@ -900,6 +974,6 @@ def _trade_plan(prop: Proposal) -> dict:
     btr, mgr = prop.backtest or {}, prop.manager or {}
     tp = btr.get("tuned_plan")
     if not (tp and mgr.get("tuned_by_backtest")):
-        return {"expected_r": (btr.get("best") or {}).get("oos", {}).get("exp_r")} if btr else {}
+        return {"expected_r": (btr.get("best") or {}).get("oos", {}).get("exp_r"), "setup": btr.get("setup")} if btr else {}
     return {"max_hold_min": tp["max_hold_min"], "trail": tp["trail"], "expected_r": tp["expected_r"],
             "variant": tp["variant"], "setup": btr.get("setup")}

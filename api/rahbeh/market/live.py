@@ -15,6 +15,7 @@ from alpaca.trading.client import TradingClient
 
 from ..config import Settings
 from .base import TIMEFRAMES, Bar, Fundamentals, NewsItem, Quote
+from .stream import PriceStream
 from .universe import BENCHMARK, FUNDAMENTALS, SYMBOLS
 
 log = logging.getLogger(__name__)
@@ -39,6 +40,21 @@ class LiveMarket:
         self._clock_cache: tuple[float, bool] = (0.0, False)
         self._http = httpx.Client(timeout=10)
         self._hist_cache: dict[tuple[str, str], tuple[float, list[Bar]]] = {}
+        self.on_move = None  # set by the app: called when a stock jumps sharply, so the scanner runs now
+        self.stream: PriceStream | None = None
+
+    def start_stream(self) -> None:
+        """Websocket prices (Alpaca). The REST refresh every scan stays as the fallback."""
+        if not self.s.alpaca_stream or self.stream:
+            return
+
+        def on_price(sym: str, price: float, ts: datetime) -> None:
+            with self._lock:
+                self._quotes[sym] = Quote(sym, price, ts, "alpaca-stream")
+
+        self.stream = PriceStream(self.s.alpaca_api_key, self.s.alpaca_secret_key, [*self._symbols, BENCHMARK], self._feed, on_price,
+                                  on_move=lambda sym: self.on_move(sym) if self.on_move else None, move_pct=self.s.stream_move_pct)
+        self.stream.start()
 
     def refresh(self) -> None:
         """Pull the latest minute bars and trades for the whole watchlist in two requests."""

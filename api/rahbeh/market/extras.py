@@ -55,6 +55,7 @@ class EarningsInfo:
     next_hour: str | None = None  # bmo (before open) | amc (after close) | dmh
     eps_estimate: float | None = None
     history: list[dict] = field(default_factory=list)  # [{period, estimate, actual, surprise_pct}], newest first
+    known: bool = False  # True only when the earnings calendar was actually read (no key or a failed fetch leaves it False)
 
     def days_until(self, today: date) -> int | None:
         if not self.next_date:
@@ -173,7 +174,7 @@ def parse_finnhub_earnings(calendar: dict, surprises: list, today: date) -> Earn
          "surprise_pct": r.get("surprisePercent")}
         for r in sorted(surprises or [], key=lambda r: r.get("period", ""), reverse=True)[:4]
     ]
-    return EarningsInfo(nxt.get("date"), nxt.get("hour") or None, nxt.get("epsEstimate"), hist)
+    return EarningsInfo(nxt.get("date"), nxt.get("hour") or None, nxt.get("epsEstimate"), hist, known=True)
 
 
 def parse_finnhub_recommendation(rows: list) -> Ratings | None:
@@ -388,7 +389,7 @@ class SimExtras:
             act = round(est * (1 + rng.gauss(0.03, 0.06)), 2)
             period = (self._today() - timedelta(days=91 * (q + 1))).isoformat()
             hist.append({"period": period, "estimate": est, "actual": act, "surprise_pct": round((act / est - 1) * 100, 2)})
-        return EarningsInfo((self._today() + timedelta(days=days)).isoformat(), rng.choice(["bmo", "amc"]), eps, hist)
+        return EarningsInfo((self._today() + timedelta(days=days)).isoformat(), rng.choice(["bmo", "amc"]), eps, hist, known=True)
 
     def ratings(self, symbol: str) -> Ratings | None:
         rng = self._rng("rec", symbol)

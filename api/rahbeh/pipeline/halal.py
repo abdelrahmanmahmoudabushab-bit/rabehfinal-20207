@@ -18,7 +18,8 @@ PROHIBITED_TAGS = {
     "adult": "adult entertainment",
     "weapons": "weapons and defense",
 }
-PROHIBITED_INDUSTRY_WORDS = ("bank", "insurance", "alcohol", "brewer", "distiller", "winer", "tobacco", "casino", "gambling", "gaming")
+PROHIBITED_INDUSTRY_WORDS = ("bank", "insurance", "alcohol", "brewer", "distiller", "winer", "tobacco", "casino", "gambling", "betting",
+                             "lottery", "weapon", "firearm", "ammunition", "defense", "pork", "adult entertainment", "cannabis")
 MAX_DEBT_TO_MCAP = 0.30
 MAX_CASH_TO_MCAP = 0.30
 

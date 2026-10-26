@@ -3,8 +3,9 @@
 import Link from "next/link";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/misc";
-import { useApi, type Mood } from "@/lib/api";
+import { useApi, type Mood, type PrecomputeStatus } from "@/lib/api";
 import { clock } from "@/lib/format";
+import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 export const MOOD_STYLE: Record<Mood["level"], string> = {
@@ -15,6 +16,8 @@ export const MOOD_STYLE: Record<Mood["level"], string> = {
 
 export function MoodChip() {
   const { data: m } = useApi<Mood>("/mood", { refreshInterval: 15000 });
+  const { t } = useI18n();
+  const { data: pc } = useApi<PrecomputeStatus>("/backtest/precompute", { refreshInterval: 60000 });
   if (!m?.level) return null;
   return (
     <Tooltip>
@@ -32,6 +35,11 @@ export function MoodChip() {
         <div className="font-semibold">Market mood: {m.level}</div>
         <div>{m.summary}</div>
         <div className="mt-1 opacity-80">{m.reasons.join(" · ")}</div>
+        {pc?.regime && (
+          <div className="mt-1 font-mono text-[10px] uppercase opacity-80">
+            {t("marketRegime")}: {t(pc.regime)}
+          </div>
+        )}
         {m.next_event && (
           <div className="mt-1 opacity-80">
             Next: {m.next_event.event} at {clock(m.next_event.time)} ({m.next_event.impact})

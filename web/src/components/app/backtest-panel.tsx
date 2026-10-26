@@ -4,6 +4,7 @@ import { AlertTriangle, CheckCircle2, FlaskConical, XCircle } from "lucide-react
 import { Area, Bar, BarChart, CartesianGrid, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import type { Backtest, BtStats } from "@/lib/api";
+import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 const VERDICT = {
@@ -94,6 +95,8 @@ export function BacktestPanel({ bt, managerLevels }: { bt: Backtest; managerLeve
         </>
       )}
 
+      <RegimeSelection bt={bt} />
+
       <div className="grid gap-4 md:grid-cols-2">
         {bt.equity && bt.equity.length > 1 && <EquityCurve data={bt.equity} />}
         {bt.heatmap && bt.heatmap.cells.length > 0 && <Heatmap h={bt.heatmap} />}
@@ -125,6 +128,47 @@ export function BacktestPanel({ bt, managerLevels }: { bt: Backtest; managerLeve
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function RegimeSelection({ bt }: { bt: Backtest }) {
+  const { t } = useI18n();
+  const rg = bt.regime;
+  const sel = bt.selection;
+  const rows = rg ? Object.entries(rg.by_regime ?? {}) : [];
+  const hasSel = sel?.candidates != null && sel.oos_t != null && sel.t_bar != null;
+  if (!rg && !hasSel) return null;
+  const cur = rg?.current;
+  return (
+    <div className="space-y-2 font-mono text-xs">
+      {rg && (
+        <div className="border p-2">
+          <div className="text-muted-foreground mb-1 flex justify-between text-[10px] uppercase">
+            <span>{t("marketRegime")}</span>
+            <span className="text-foreground">
+              {t("regimeNow")}: {cur ? t(cur) : t("regimeUnknown")}
+            </span>
+          </div>
+          {rows.map(([name, r]) => (
+            <div key={name} className={cn("flex justify-between border-b border-dashed py-1 last:border-b-0", name === cur && "font-bold")}>
+              <span>{name === "trending" || name === "choppy" ? t(name) : name}</span>
+              <span>
+                {r.n} · {(r.win * 100).toFixed(0)}% · <span className={r.exp_r > 0 ? "text-gain" : "text-loss"}>{fmtR(r.exp_r)}</span>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {hasSel && (
+        <div className="text-muted-foreground text-[11px]">
+          <span className="text-foreground uppercase">{t("selectionBar")}</span>:{" "}
+          {t("selectionLine")
+            .replace("{n}", sel!.candidates!.toLocaleString())
+            .replace("{t}", sel!.oos_t!.toFixed(2))
+            .replace("{bar}", sel!.t_bar!.toFixed(2))}
+        </div>
+      )}
     </div>
   );
 }

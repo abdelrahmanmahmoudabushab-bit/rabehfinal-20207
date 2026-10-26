@@ -10,7 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Skeleton } from "@/components/ui/misc";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Empty, PageHeader, Stat } from "@/components/app/bits";
-import { api, refreshAll, useApi, type AbResult, type LiveVsBacktest, type Review, type Status, type Usage } from "@/lib/api";
+import { api, refreshAll, useApi, type AbResult, type AgentReport, type LiveVsBacktest, type SetupHealth, type Review, type Status, type Usage } from "@/lib/api";
 import { pct, signedMoney, timeAgo, tone } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
@@ -59,6 +59,11 @@ export default function ReviewPage() {
           <LiveVsBacktestCard />
           <AbCard />
         </div>
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <AgentsValueCard />
+        <SetupHealthCard />
       </div>
     </>
   );
@@ -115,6 +120,7 @@ function ReviewCard({ r }: { r: Review }) {
 }
 
 function UsageCard() {
+  const { t } = useI18n();
   const { data } = useApi<Usage>("/usage", { refreshInterval: 15000 });
   const { data: status } = useApi<Status>("/status");
   return (
@@ -131,7 +137,7 @@ function UsageCard() {
         <div className="grid grid-cols-2 gap-3">
           <Stat label="Calls" value={data?.calls_24h ?? "—"} sub={data?.errors_24h ? `${data.errors_24h} errors` : undefined} />
           <Stat label="Est. cost" value={data ? `$${data.est_cost_24h.toFixed(2)}` : "—"} />
-          <Stat label="Tokens in" value={data ? data.input_tokens_24h.toLocaleString() : "—"} sub={data ? `${data.cache_read_tokens_24h.toLocaleString()} cached` : undefined} />
+          <Stat label="Tokens in" value={data ? data.input_tokens_24h.toLocaleString() : "—"} sub={data ? `${data.cache_read_tokens_24h.toLocaleString()} cached${data.cache_saved_24h != null ? ` · ${t("cacheSaved")} $${data.cache_saved_24h.toFixed(2)}` : ""}` : undefined} />
           <Stat label="Tokens out" value={data ? data.output_tokens_24h.toLocaleString() : "—"} />
           <Stat label="Cost per trade" value={data?.cost_per_trade != null ? `$${data.cost_per_trade.toFixed(2)}` : "—"} sub={data ? `${data.trades_24h} trades in 24h` : undefined} />
           <Stat
@@ -240,6 +246,140 @@ function AbCard() {
           {data?.samples ?? 0} scored samples{data?.pending ? ` · ${data.pending} waiting for their 60-minute result` : ""}.{" "}
           {(data?.samples ?? 0) < (data?.min_samples ?? 100) ? `Needs ${data?.min_samples ?? 100}+ before it means anything. ${data?.note ?? ""}` : ""}
         </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+const fmtR = (x: number | null | undefined) => (x == null ? "—" : `${x >= 0 ? "+" : ""}${x.toFixed(2)}R`);
+
+function Buckets({ title, rows }: { title: string; rows: AgentReport["by_analyst_score"] }) {
+  const { t } = useI18n();
+  return (
+    <div>
+      <div className="text-muted-foreground mb-1 font-mono text-[10px] uppercase">{title}</div>
+      {rows.map((b) => (
+        <div key={b.bucket} className="flex justify-between border-b border-dashed py-1 font-mono text-[11px]">
+          <span>{b.bucket}</span>
+          <span>
+            {b.trades} {t("tradesCol")} · <span className={tone(b.avg_r)}>{fmtR(b.avg_r)}</span>
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AgentsValueCard() {
+  const { t } = useI18n();
+  const { data, error } = useApi<AgentReport>("/review/agents", { refreshInterval: 60000 });
+  return (
+    <Card className="h-fit">
+      <CardHeader>
+        <CardTitle>{t("agentsValue")}</CardTitle>
+        <CardDescription>{t("agentsValueDesc")}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {error && !data ? (
+          <p className="text-loss text-xs">{t("loadFailed")}</p>
+        ) : !data ? (
+          <Skeleton className="h-40" />
+        ) : (
+          <>
+            {data.agents.length > 0 && (
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>{t("agentCol")}</TableHead>
+                      <TableHead className="text-end">{t("callsCol")}</TableHead>
+                      <TableHead className="text-end">{t("errorsCol")}</TableHead>
+                      <TableHead className="text-end">{t("costCol")}</TableHead>
+                      <TableHead className="text-end">{t("avgMsCol")}</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {data.agents.map((a) => (
+                      <TableRow key={a.agent}>
+                        <TableCell>
+                          {a.agent}
+                          <div className="text-muted-foreground font-mono text-[10px]">{a.models.join(", ")}</div>
+                        </TableCell>
+                        <TableCell className="tabular text-end">{a.calls}</TableCell>
+                        <TableCell className={cn("tabular text-end", a.errors > 0 && "text-loss")}>{a.errors}</TableCell>
+                        <TableCell className="tabular text-end">${a.cost.toFixed(2)}</TableCell>
+                        <TableCell className="tabular text-end">{a.avg_ms}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+            {data.blocked_by.length > 0 && (
+              <div>
+                <div className="text-muted-foreground mb-1 font-mono text-[10px] uppercase">{t("blockedBy")}</div>
+                {data.blocked_by.map((b) => (
+                  <div key={b.stage} className="flex justify-between border-b border-dashed py-1 font-mono text-[11px]">
+                    <span>{b.stage}</span>
+                    <span>{b.count}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {data.closed_trades > 0 ? (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Buckets title={t("byAnalystScore")} rows={data.by_analyst_score} />
+                <Buckets title={t("byDevilSeverity")} rows={data.by_devil_severity} />
+              </div>
+            ) : (
+              <p className="text-muted-foreground text-xs">{t("noClosedTrades")}</p>
+            )}
+            <p className="text-muted-foreground text-[11px]">{data.note}</p>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function SetupHealthCard() {
+  const { t } = useI18n();
+  const { data, error } = useApi<SetupHealth>("/review/setups", { refreshInterval: 60000 });
+  const rows = data ? Object.entries(data.setups) : [];
+  const badge = {
+    ok: { v: "gain", k: "statusOk" },
+    cut: { v: "warn", k: "statusCut" },
+    paused: { v: "loss", k: "statusPaused" },
+  } as const;
+  return (
+    <Card className="h-fit">
+      <CardHeader>
+        <CardTitle>{t("setupHealth")}</CardTitle>
+        <CardDescription>{t("setupHealthDesc")}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {error && !data ? (
+          <p className="text-loss text-xs">{t("loadFailed")}</p>
+        ) : !data ? (
+          <Skeleton className="h-24" />
+        ) : !rows.length ? (
+          <p className="text-muted-foreground text-xs">{t("noLiveTrades")}</p>
+        ) : (
+          rows.map(([name, s]) => {
+            const b = badge[s.status] ?? badge.ok;
+            return (
+              <div key={name} className="flex flex-wrap items-center justify-between gap-2 border-b border-dashed py-2">
+                <div>
+                  <div className="font-mono text-xs font-semibold">{name}</div>
+                  <div className="text-muted-foreground font-mono text-[11px]">
+                    {s.trades} {t("tradesCol")} · {t("liveR")} <span className={tone(s.live_r)}>{fmtR(s.live_r)}</span> · {t("expectedR")} {fmtR(s.expected_r)}
+                  </div>
+                </div>
+                <Badge variant={b.v}>{t(b.k)}</Badge>
+              </div>
+            );
+          })
+        )}
       </CardContent>
     </Card>
   );

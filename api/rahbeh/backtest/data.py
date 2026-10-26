@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -53,7 +54,8 @@ class SimHistory:
     name = "simulated"
 
     def __init__(self, end: date | None = None):
-        self.end = end or datetime.now(ET).date() - timedelta(days=1)
+        pinned = os.environ.get("SIM_HISTORY_END")  # tests pin this so simulated history does not change with the date
+        self.end = end or (date.fromisoformat(pinned) if pinned else datetime.now(ET).date() - timedelta(days=1))
 
     def series(self, symbol: str, days: int = 60) -> Series:
         seed = int(hashlib.md5(f"hist|{symbol}|{self.end}".encode()).hexdigest()[:8], 16)

@@ -61,6 +61,9 @@ class TradeRequest:
     stop: float
     target: float
     earnings_in_days: int | None = None  # None = unknown
+    earnings_known: bool = True  # False when the earnings calendar could not be read
+    size_multiplier: float = 1.0  # tested edge, volatility and live setup health; can only shrink the 1% risk, never raise it
+    size_note: str = ""
 
 
 @dataclass
@@ -78,6 +81,7 @@ class RiskContext:
     daytrades_5d: int = 0  # day trades in the last 5 business days
     swing: bool = False  # swing mode holds overnight, so the trade is not a day trade
     session_close: datetime | None = None  # today's real close (half days close at 13:00)
+    require_earnings: bool = False  # live mode: no new position when the earnings date could not be checked
 
 
 @dataclass
@@ -136,6 +140,8 @@ def evaluate(req: TradeRequest, ctx: RiskContext, limits: Limits) -> RiskDecisio
     if req.earnings_in_days is not None:
         soon = 0 <= req.earnings_in_days <= EARNINGS_BLACKOUT_DAYS
         add("earnings", not soon, f"earnings in {req.earnings_in_days} day(s)" + (" — gap risk, no new position" if soon else ""))
+    elif ctx.require_earnings and not req.earnings_known:
+        add("earnings", False, "earnings date unknown (add FINNHUB_API_KEY, or the lookup failed) — no new position without it")
 
     hit = daily_loss_hit(ctx, lim)
     add("daily_loss", not hit, f"today's P&L {day_pnl(ctx):+,.2f} vs limit -{lim.daily_loss_limit_pct}%")
@@ -167,7 +173,8 @@ def evaluate(req: TradeRequest, ctx: RiskContext, limits: Limits) -> RiskDecisio
     equity = ctx.account.equity
     qty = 0
     if shape_ok and per_share_risk > 0:
-        qty = math.floor(equity * lim.risk_per_trade_pct / 100 * min(ctx.mood_multiplier, 1.0) / per_share_risk)
+        scale = min(ctx.mood_multiplier, 1.0) * min(max(req.size_multiplier, 0.0), 1.0)
+        qty = math.floor(equity * lim.risk_per_trade_pct / 100 * scale / per_share_risk)
         qty = min(qty, math.floor(equity * lim.max_position_pct / 100 / req.entry))
         sector_value = sum(p.market_value for p in ctx.positions if ctx.sector_of.get(p.symbol) == req.sector)
         sector_room = equity * lim.max_sector_pct / 100 - sector_value
@@ -175,6 +182,8 @@ def evaluate(req: TradeRequest, ctx: RiskContext, limits: Limits) -> RiskDecisio
         qty = min(qty, math.floor(ctx.account.buying_power * 0.98 / req.entry))
         add("sector_exposure", sector_room > req.entry,
             f"{req.sector} exposure {sector_value / equity:.0%} of equity (limit {lim.max_sector_pct}%)" if equity else "no equity")
+    if req.size_multiplier < 1:
+        add("setup_health", req.size_multiplier > 0, req.size_note or f"size x{req.size_multiplier:.2f}")
     add("size", qty >= 1, f"{qty} shares, risking {qty * per_share_risk:,.2f} ({lim.risk_per_trade_pct}% max)")
 
     approved = all(c.passed for c in checks)

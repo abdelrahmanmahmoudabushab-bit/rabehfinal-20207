@@ -119,7 +119,7 @@ function SettingsForm({ data }: { data: Settings }) {
                     <div className="mt-1 space-y-1">
                       <Progress value={(data.autopilot.copilot_trades / data.autopilot.needed) * 100} />
                       <div className="text-muted-foreground text-[11px]">
-                        {data.autopilot.copilot_trades}/{data.autopilot.needed} Copilot trades completed to unlock
+                        {data.autopilot.copilot_trades}/{data.autopilot.needed} Copilot trades completed to unlock. {t("autopilotUnlockNote")}
                       </div>
                     </div>
                   )}
@@ -172,7 +172,7 @@ function SettingsForm({ data }: { data: Settings }) {
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <Label>Halal only</Label>
-                  <p className="text-muted-foreground mt-1 text-xs">Screens out banks, insurance, alcohol, tobacco, gambling, weapons, and companies with debt or cash over 30% of market value.</p>
+                  <p className="text-muted-foreground mt-1 text-xs">{t("halalNote")}</p>
                 </div>
                 <Switch checked={d.halal_only} onCheckedChange={(v) => set("halal_only", v)} />
               </div>
@@ -185,11 +185,9 @@ function SettingsForm({ data }: { data: Settings }) {
                   <SelectContent>
                     <SelectItem value="day_momentum">Day trader — momentum &amp; news</SelectItem>
                     <SelectItem value="swing">Swing trader</SelectItem>
-                    <SelectItem value="long_term">Long-term investor</SelectItem>
-                    <SelectItem value="dividend">Dividend focus</SelectItem>
                   </SelectContent>
                 </Select>
-                <p className="text-muted-foreground text-xs">Shared with the agents as your preference. The MVP trades intraday only.</p>
+                <p className="text-muted-foreground text-xs">{t("strategyNote")}</p>
               </div>
               <div className="space-y-2">
                 <Label>Allowed stocks</Label>

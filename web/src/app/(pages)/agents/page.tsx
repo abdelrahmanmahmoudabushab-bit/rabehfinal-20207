@@ -129,7 +129,7 @@ export default function AgentsPage() {
                 </div>
                 <div>
                   <div className="text-muted-foreground mb-1 font-mono text-[10px] uppercase">
-                    Skills {selected.kind === "claude" ? "(tools it can call)" : selected.kind === "rules" ? "(data the rules read)" : "(functions it runs)"}
+                    Skills {selected.kind === "claude" ? "(tools it can call)" : selected.kind === "rules" ? "(declared: the rules read this data directly)" : "(functions it runs)"}
                   </div>
                   <ul className="space-y-1.5">
                     {selected.skills.map((k) => (

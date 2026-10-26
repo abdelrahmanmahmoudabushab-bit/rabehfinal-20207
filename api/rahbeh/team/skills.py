@@ -1,8 +1,8 @@
-"""Skills: the read-only tools an agent can call. Each skill is backed by one data source / API.
+"""Skills: the read-only tools an agent can call. Each skill lists the data sources / APIs it reads.
 
-With Claude, an agent gets its own skills as tools and decides what to look up. Without Claude, the
-rule-based version of the agent calls the same skills directly, so either way you can see exactly
-which data each agent used.
+With Claude, an agent gets its own skills as tools and decides what to look up. Without Claude (or in
+the free starter team) the rule-based specialist functions read the same data from the engine
+directly, and the trace lists the skills they DECLARE, not calls they made.
 """
 
 from __future__ import annotations
@@ -218,11 +218,11 @@ SKILLS: dict[str, Skill] = {s.name: s for s in [
     Skill("get_benchmark", "S&P 500 (SPY) indicators", ["Alpaca market data"], {}, [], get_benchmark),
     Skill("check_halal", "Business-activity and AAOIFI ratio screen", ["Financial Modeling Prep"], SYM, ["symbol"], check_halal),
     Skill("get_account", "Equity, cash, today's P&L and open positions", ["Alpaca broker"], {}, [], get_account),
-    Skill("get_position", "Our open position in a stock: size, entry, stop, target, P&L in R", ["Rahbeh database", "Alpaca broker"], SYM, ["symbol"], get_position),
-    Skill("risk_check", "Dry-run the risk engine on a plan: allowed or not, and the maximum size", ["Rahbeh risk engine"],
+    Skill("get_position", "Our open position in a stock: size, entry, stop, target, P&L in R (broker positions + live quote)", ["Rahbeh database", "Alpaca broker"], SYM, ["symbol"], get_position),
+    Skill("risk_check", "Dry-run the risk engine on a plan: allowed or not, and the maximum size (max_qty is before the size reduction for weak edge, volatility and live setup health)", ["Rahbeh risk engine"],
           {**SYM, "entry": {"type": "number"}, "stop": {"type": "number"}, "target": {"type": "number"}}, ["symbol", "entry", "stop", "target"], risk_check),
     Skill("run_backtest", "Backtest the setup firing on a stock right now, 1,000+ ways, judged out of sample with Monte Carlo",
-          ["Alpaca market data", "Rahbeh backtester"], SYM, ["symbol"], run_backtest),
+          ["history (Alpaca real, or simulated in demo)", "Rahbeh backtester"], SYM, ["symbol"], run_backtest),
     Skill("get_recent_trades", "Recently closed trades with result and R multiple", ["Rahbeh database"],
           {"limit": {"type": "integer"}}, [], get_recent_trades),
     Skill("get_decision_log", "Recent decisions and every 'no' with its reason", ["Rahbeh database"],

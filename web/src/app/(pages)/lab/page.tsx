@@ -10,7 +10,8 @@ import { Skeleton } from "@/components/ui/misc";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { BacktestPanel } from "@/components/app/backtest-panel";
 import { PageHeader, Stat } from "@/components/app/bits";
-import { api, useApi, type LabJob } from "@/lib/api";
+import { api, useApi, type LabJob, type PrecomputeStatus } from "@/lib/api";
+import { useI18n } from "@/lib/i18n";
 import { timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -51,7 +52,9 @@ export default function LabPage() {
         </Button>
       </PageHeader>
 
-      <Card>
+      <PrecomputeCard />
+
+      <Card className="mt-4">
         <CardContent className="flex flex-wrap items-center gap-4">
           <div className="flex flex-wrap gap-1.5">
             {SETUPS.map(([k, label]) => {
@@ -193,5 +196,63 @@ export default function LabPage() {
         </div>
       ) : null}
     </>
+  );
+}
+
+function PrecomputeCard() {
+  const { t } = useI18n();
+  const { data, error, mutate } = useApi<PrecomputeStatus>("/backtest/precompute", { refreshInterval: 5000 });
+  const [busy, setBusy] = useState(false);
+  const running = data?.status === "running";
+  const st = data?.status;
+
+  async function start() {
+    setBusy(true);
+    try {
+      await api.post("/backtest/precompute");
+      toast.success(t("precomputeStarted"));
+      mutate();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t("nightlyPrecompute")}</CardTitle>
+        <CardDescription>{t("nightlyPrecomputeDesc")}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {error && !data ? (
+          <p className="text-loss text-xs">{t("loadFailed")}</p>
+        ) : !data ? (
+          <Skeleton className="h-16" />
+        ) : (
+          <div className="flex flex-wrap items-end gap-4">
+            <div className="grid flex-1 grid-cols-2 gap-3 md:grid-cols-4">
+              <Stat
+                label={t("statusCol")}
+                value={st ? t(st) : t("idle")}
+                valueClass={st === "failed" ? "text-loss" : undefined}
+                sub={data.scheduled ? t("scheduledNightly") : t("notScheduled")}
+              />
+              <Stat
+                label={t("progressCol")}
+                value={data.total ? `${data.done ?? 0}/${data.total}` : "—"}
+                sub={data.seconds != null ? `${data.seconds.toFixed(0)}s` : data.error ?? data.note}
+              />
+              <Stat label={t("cachedVerdicts")} value={data.cached_verdicts.toLocaleString()} />
+              <Stat label={t("marketRegime")} value={data.regime ? t(data.regime) : t("regimeUnknown")} />
+            </div>
+            <Button onClick={start} disabled={busy || running}>
+              {running ? <Loader2 className="animate-spin" /> : <Play />} {t("runNow")}
+            </Button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

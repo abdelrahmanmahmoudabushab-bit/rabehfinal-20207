@@ -20,8 +20,9 @@ const STAGES: { key: string; label: string }[] = [
   { key: "halal", label: "3 · Halal" },
   { key: "score", label: "4 · Score" },
   { key: "devils_advocate", label: "5 · Devil" },
-  { key: "risk", label: "6 · Risk" },
-  { key: "user", label: "7 · You" },
+  { key: "backtest", label: "6 · Backtest" },
+  { key: "risk", label: "7 · Risk" },
+  { key: "user", label: "8 · You" },
   { key: "execution", label: "Bought" },
   { key: "exit", label: "Exits" },
 ];
@@ -36,7 +37,7 @@ export default function LogPage() {
     <>
       <PageHeader
         title={t("log")}
-        description="Every trade must pass seven checks. Every “no” is written down here with its reason, so nothing the agents do is a black box."
+        description={t("logDesc")}
       />
       <div className="mb-3 flex flex-wrap gap-1.5">
         {STAGES.map((s) => (

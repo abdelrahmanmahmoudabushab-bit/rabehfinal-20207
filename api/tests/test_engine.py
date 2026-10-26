@@ -10,10 +10,10 @@ from rahbeh.market.sim import SimMarket
 from rahbeh.pipeline.agents import Agents
 
 
-def make_engine():
+def make_engine(seed=11):
     init_db()
     s = Settings(anthropic_api_key=None, alpaca_api_key=None, alpaca_secret_key=None)
-    market = SimMarket(seed=11)
+    market = SimMarket(seed=seed)
     return Engine(s, market, SimBroker(market), Agents(s))
 
 
@@ -74,7 +74,7 @@ def test_context_has_extras_and_team():
 def test_deal_finder_full_loop():
     from rahbeh.team import hunter
 
-    e = make_engine()
+    e = make_engine(seed=1)  # fixed seed on the pinned demo clock: this market has a mover that passes the backtest
     for _ in range(3):
         e.cycle()
     deal_hunt = None

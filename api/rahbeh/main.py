@@ -2,6 +2,7 @@
 
 import hmac
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -31,7 +32,7 @@ from .db import (
 from .engine import Engine
 from .market.universe import FUNDAMENTALS, sector_of
 from .pipeline import features, halal, risk
-from .pipeline.agents import Agents, call_cost
+from .pipeline.agents import PRICES, Agents, call_cost
 from .team import hunter
 from .team.registry import AGENTS
 from .team.skills import SKILLS
@@ -68,6 +69,8 @@ def _demo_restart_cleanup(e: Engine) -> None:
     with SessionLocal() as db:
         for t in e.open_trades(db):
             t.closed_at, t.exit_price, t.exit_reason, t.pnl, t.r_multiple = e.market.now(), t.entry_price, "demo restart", 0.0, 0.0
+        for old in db.scalars(select(Trade)).all():
+            old.sim = True  # everything in a demo database is simulated, including rows from before this flag existed
         for p in db.scalars(select(Proposal).where(Proposal.status.in_(["pending", "idea"]))).all():
             p.status, p.status_reason = "expired", "demo restart"
         db.commit()
@@ -79,6 +82,14 @@ def _safe_cycle() -> None:
         log.info("cycle: %s", summary)
     except Exception:
         log.exception("cycle failed")
+
+
+def _safe_precompute() -> None:
+    try:
+        st = E().backtester.precompute()
+        log.info("backtest precompute: %s", st)
+    except Exception:
+        log.exception("precompute failed")
 
 
 def _safe_review() -> None:
@@ -98,13 +109,28 @@ async def lifespan(_: FastAPI):
     else:
         for note in engine.reconcile():
             log.warning("reconcile: %s", note)
-    scheduler.add_job(_safe_cycle, "interval", seconds=settings.scan_interval_seconds, max_instances=1, coalesce=True,
+    if not settings.demo and hasattr(engine.market, "start_stream"):
+        last_wake = [0.0]
+
+        def wake(sym: str) -> None:  # a sharp move: scan now instead of waiting for the next minute (at most every 15 s)
+            if time.monotonic() - last_wake[0] > 15:
+                last_wake[0] = time.monotonic()
+                log.info("stream: %s moved sharply, scanning now", sym)
+                scheduler.modify_job("cycle", next_run_time=datetime.now(UTC))
+
+        engine.market.on_move = wake
+        engine.market.start_stream()
+    scheduler.add_job(_safe_cycle, "interval", id="cycle", seconds=settings.scan_interval_seconds, max_instances=1, coalesce=True,
                       next_run_time=datetime.now(UTC) + timedelta(seconds=3))
     scheduler.add_job(_safe_review, CronTrigger(day_of_week="mon-fri", hour=16, minute=30, timezone="America/New_York"))
+    if settings.backtest_precompute:  # tomorrow's verdicts are ready before the open
+        scheduler.add_job(_safe_precompute, CronTrigger(day_of_week="mon-fri", hour=17, minute=0, timezone="America/New_York"),
+                          max_instances=1, coalesce=True)
     scheduler.start()
     log.info("Rahbeh started (demo=%s, claude=%s)", settings.demo, settings.claude_enabled)
     yield
     scheduler.shutdown(wait=False)
+    engine.backtester.shutdown()
 
 
 app = FastAPI(title="Rahbeh API", lifespan=lifespan)
@@ -163,12 +189,16 @@ def trade_out(t: Trade, price: float | None = None) -> dict:
 
 
 def settings_out(u: UserSettings, db) -> dict:
-    copilot_trades = db.scalar(select(func.count(Trade.id)).where(Trade.closed_at.is_not(None), Trade.mode == "copilot")) or 0
+    # completed Copilot trades the app opened, in this kind of account (simulated trades never unlock live Autopilot);
+    # trades closed by a restart or outside the app say nothing about how the trading went
+    copilot_trades = db.scalar(select(func.count(Trade.id)).where(
+        Trade.closed_at.is_not(None), Trade.mode == "copilot", Trade.sim == settings.demo,
+        Trade.exit_reason.not_in(["demo restart", "closed outside app"]))) or 0
     return {
         "mode": u.mode, "risk_per_trade_pct": u.risk_per_trade_pct, "daily_loss_limit_pct": u.daily_loss_limit_pct,
         "max_position_pct": u.max_position_pct, "max_sector_pct": u.max_sector_pct, "max_open_positions": u.max_open_positions,
         "max_trades_per_day": u.max_trades_per_day, "min_reward_risk": u.min_reward_risk, "score_threshold": u.score_threshold,
-        "halal_only": u.halal_only, "allowed_symbols": u.allowed_symbols, "strategy": u.strategy, "language": u.language,
+        "halal_only": u.halal_only, "allowed_symbols": u.allowed_symbols, "strategy": u.strategy if u.strategy in ("day_momentum", "swing") else "day_momentum", "language": u.language,
         "kill_switch": u.kill_switch,
         "autopilot": {"unlocked": u.autopilot_unlocked or copilot_trades >= AUTOPILOT_UNLOCK_TRADES,
                       "copilot_trades": copilot_trades, "needed": AUTOPILOT_UNLOCK_TRADES},
@@ -331,7 +361,7 @@ class SettingsIn(BaseModel):
     score_threshold: int | None = Field(None, ge=50, le=95)
     halal_only: bool | None = None
     allowed_symbols: list[str] | None = None
-    strategy: Literal["day_momentum", "swing", "long_term", "dividend"] | None = None
+    strategy: Literal["day_momentum", "swing"] | None = None
     language: Literal["en", "ar"] | None = None
 
 
@@ -358,8 +388,9 @@ class KillIn(BaseModel):
 
 @app.post("/api/kill")
 def kill(body: KillIn):
-    E().set_kill_switch(body.on)
-    return {"kill_switch": body.on}
+    e = E()
+    e.set_kill_switch(body.on)
+    return {"kill_switch": body.on, "failed_to_close": e.kill_failed if body.on else []}
 
 
 @app.post("/api/scan")
@@ -538,6 +569,24 @@ def lab_get(job_id: str):
     return job
 
 
+@app.get("/api/backtest/precompute")
+def precompute_status():
+    bt = E().backtester
+    return {**bt.precompute_status, "regime": bt.current_regime(), "cached_verdicts": len(bt._core_cache),
+            "workers": settings.backtest_workers, "scheduled": settings.backtest_precompute}
+
+
+@app.post("/api/backtest/precompute")
+def precompute_start():
+    bt = E().backtester
+    if bt.precompute_status.get("status") == "running":
+        return bt.precompute_status
+    import threading
+
+    threading.Thread(target=bt.precompute, daemon=True, name="precompute").start()
+    return {"status": "running"}
+
+
 @app.post("/api/backtest/{symbol}")
 def backtest_symbol(symbol: str):
     """Backtest the setup firing on this stock right now, 1,000+ ways."""
@@ -642,6 +691,8 @@ def usage():
         "calls_24h": len(calls), "errors_24h": sum(1 for c in calls if not c.ok),
         "input_tokens_24h": sum(c.input_tokens for c in calls), "output_tokens_24h": sum(c.output_tokens for c in calls),
         "cache_read_tokens_24h": sum(c.cache_read_tokens for c in calls), "est_cost_24h": round(cost, 4),
+        "cache_saved_24h": round(sum(c.cache_read_tokens * (PRICES.get(c.model, PRICES["claude-opus-5-5"])[0]
+                                                            - PRICES.get(c.model, PRICES["claude-opus-5-5"])[2]) / 1e6 for c in calls), 4),
         "trades_24h": trades_24h, "cost_per_trade": round(cost / trades_24h, 4) if trades_24h else None,
         "budget_usd": settings.daily_ai_budget_usd, "spend_today": round(agents.spend_today(), 4), "over_budget": agents.over_budget(),
         "recent": [{"at": iso(c.at), "agent": c.agent, "symbol": c.symbol, "model": c.model, "in": c.input_tokens,
@@ -667,6 +718,52 @@ def ab_test():
     return {"samples": len(rows), "pending": pending, "claude": side("claude_go"), "rules": side("rules_go"),
             "agreement": round(sum(1 for r in rows if r.claude_go == r.rules_go) / len(rows), 3) if rows else None,
             "min_samples": 100, "note": "Needs an Anthropic key: Claude's calls are shadowed by the free rules on every analysis."}
+
+
+@app.get("/api/review/agents")
+def agent_report(days: int = 30):
+    """What each agent costs and what it added: calls, errors, cost and speed per agent, plus how the trades each
+    one shaped turned out (analyst score and devil's severity against realized R, and who blocked what)."""
+    since = datetime.now(UTC) - timedelta(days=days)
+    with SessionLocal() as db:
+        calls = db.scalars(select(AgentCall).where(AgentCall.at >= since)).all()
+        blocks = db.execute(select(DecisionLog.stage, func.count()).where(DecisionLog.at >= since, DecisionLog.outcome == "no")
+                            .group_by(DecisionLog.stage)).all()
+        rows = db.execute(select(Proposal, Trade).join(Trade, Trade.proposal_id == Proposal.id)
+                          .where(Trade.closed_at.is_not(None), Trade.r_multiple.is_not(None), Trade.exit_reason != "demo restart")).all()
+    per: dict[str, dict] = {}
+    for c in calls:
+        a = per.setdefault(c.agent, {"agent": c.agent, "calls": 0, "errors": 0, "cost": 0.0, "ms": 0, "models": set()})
+        a["calls"] += 1
+        a["errors"] += (not c.ok)
+        a["cost"] += call_cost(c.model, c.input_tokens, c.output_tokens, c.cache_read_tokens)
+        a["ms"] += c.latency_ms
+        a["models"].add(c.model)
+    agents_out = [{"agent": a["agent"], "calls": a["calls"], "errors": a["errors"], "cost": round(a["cost"], 4),
+                   "avg_ms": round(a["ms"] / a["calls"]), "models": sorted(a["models"])} for a in per.values()]
+
+    def bucket(rows_, key, edges):
+        out = []
+        for lo, hi, label in edges:
+            rs = [t.r_multiple for p, t in rows_ if lo <= key(p) < hi]
+            out.append({"bucket": label, "trades": len(rs), "avg_r": round(sum(rs) / len(rs), 3) if rs else None})
+        return out
+
+    return {
+        "days": days, "agents": sorted(agents_out, key=lambda a: -a["cost"]),
+        "blocked_by": [{"stage": st, "count": n} for st, n in sorted(blocks, key=lambda x: -x[1])],
+        "closed_trades": len(rows),
+        "by_analyst_score": bucket(rows, lambda p: p.score, [(0, 70, "under 70"), (70, 80, "70-79"), (80, 101, "80+")]),
+        "by_devil_severity": bucket(rows, lambda p: (p.devil or {}).get("severity", 0), [(0, 2, "1 (minor)"), (2, 4, "2-3"), (4, 6, "4-5")]),
+        "note": "Needs closed trades to say anything. If a higher analyst score or a lower devil severity does not lead to better R, that agent is not adding value.",
+    }
+
+
+@app.get("/api/review/setups")
+def setup_health_report():
+    e = E()
+    with SessionLocal() as db:
+        return {"setups": e.setup_health(db), "regime": e.backtester.current_regime()}
 
 
 @app.get("/api/review/live-vs-backtest")
