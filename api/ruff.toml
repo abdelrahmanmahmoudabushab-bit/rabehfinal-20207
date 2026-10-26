@@ -1,0 +1,6 @@
+line-length = 130
+target-version = "py312"
+
+[lint]
+select = ["F", "E9", "B", "I"]
+ignore = ["B905"]  # several zips deliberately pair a series with its own offset

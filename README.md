@@ -122,15 +122,17 @@ Orders are **bracket orders** (stop + target held at the broker). Stops rise to 
 
 ```
 api/   Python + FastAPI, SQLAlchemy (SQLite default, Postgres in Docker), APScheduler
-  rahbeh/market/    sim.py (demo market), live.py (Alpaca + Finnhub + FMP)
-  rahbeh/broker/    sim.py (paper sim), alpaca_broker.py (bracket orders)
-  rahbeh/pipeline/  checks, features, laya, halal, risk, agents (Claude + fallbacks)
-  rahbeh/engine.py  the seven checks, execution, trade management, reviewer, briefing
-  tests/            risk engine, data checks, LAYA, halal, full demo loop
+  rahbeh/market/    sim.py (demo market), live.py (Alpaca + Finnhub + FMP), extras.py (SEC, earnings, ratings, FRED)
+  rahbeh/broker/    sim.py (paper sim), alpaca_broker.py (bracket + limit orders)
+  rahbeh/pipeline/  checks, features, laya, halal, mood, risk, agents (Claude + rule fallbacks)
+  rahbeh/team/      registry (every agent's job), skills (tools + data sources), hunter (deal finder)
+  rahbeh/backtest/  vectorized engine, history loaders, Backtester service
+  rahbeh/engine.py  the seven checks, execution, trade management, keeper, reviewer, briefing
+  tests/            risk engine, data checks, halal, backtester, deal finder, bug regressions
 web/   Next.js 16 + Tailwind 4 + shadcn/ui + lightweight-charts, black/white themes, English/Arabic (RTL)
 ```
 
-Run the tests: `cd api && .venv/bin/python -m pytest`.
+Run the tests: `cd api && .venv/bin/python -m pytest`. Lint: `ruff check api` and `cd web && npm run lint`.
 
 ## Security
 
@@ -141,9 +143,9 @@ Run the tests: `cd api && .venv/bin/python -m pytest`.
 
 ## Honest limits of this version
 
-- **Single user.** There are no accounts or login, and no Stripe yet. Run it locally or behind your own auth before exposing it.
+- **Single user.** One app password (`RAHBEH_PASSWORD`) protects it; there are no separate user accounts or Stripe billing yet.
 - **Long only, intraday only.** There is no shorting, which also keeps the halal mode simple.
-- **Not backtested.** The demo simulator shows how the app works, not whether the strategy makes money. Run paper trading for weeks before any real money, and compare against the S&P 500 line on the dashboard.
+- **Backtests are not proof.** In demo mode they run on simulated history (see the caveat above). Even on real Alpaca history, past edge can vanish: run paper trading for weeks before any real money, and compare against the S&P 500 line on the dashboard.
 - **The halal screen is a screening aid.** It is not a fatwa.
 - **Live trading with real money** (`ALPACA_PAPER=false`) and offering Autopilot to other people both need legal and regulatory review in each country first.
 - **Not financial advice.**

@@ -84,7 +84,7 @@ def test_reviewer_needs_twenty_trades():
     with SessionLocal() as db:
         for t in db.scalars(select(Trade)).all():
             db.delete(t)
-        for i in range(5):
+        for _ in range(5):
             db.add(Trade(symbol="AAPL", qty=1, entry_price=100, initial_stop=99, stop=99, target=102, pnl=-1, r_multiple=-1,
                          exit_reason="stop", opened_at=e.market.now() - timedelta(hours=1), closed_at=e.market.now(), notes=[]))
         db.commit()

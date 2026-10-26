@@ -1,9 +1,9 @@
 """Paper broker for demo mode: fills at the simulated price and works stop/target legs every bar."""
 
 import threading
-from zoneinfo import ZoneInfo
 import uuid
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 from ..market.base import MarketData
 from .base import Account, OrderResult, Position

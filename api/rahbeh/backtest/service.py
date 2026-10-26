@@ -10,12 +10,12 @@ stop / target / holding time.
 from __future__ import annotations
 
 import logging
-
-import numpy as np
 import threading
 import time
 import uuid
 from datetime import UTC, datetime
+
+import numpy as np
 
 from ..market.base import Bar, aggregate
 from ..market.universe import FUNDAMENTALS, sector_of

@@ -141,8 +141,9 @@ def get_account(e: Engine) -> dict:
 
 
 def get_position(e: Engine, symbol: str) -> dict:
-    from ..db import SessionLocal, Trade
     from sqlalchemy import select
+
+    from ..db import SessionLocal, Trade
 
     with SessionLocal() as db:
         t = db.scalar(select(Trade).where(Trade.symbol == symbol, Trade.closed_at.is_(None)))
@@ -179,8 +180,9 @@ def run_backtest(e: Engine, symbol: str) -> dict:
 
 
 def get_recent_trades(e: Engine, limit: int = 20) -> dict:
-    from ..db import SessionLocal, Trade
     from sqlalchemy import select
+
+    from ..db import SessionLocal, Trade
 
     with SessionLocal() as db:
         rows = db.scalars(select(Trade).where(Trade.closed_at.is_not(None)).order_by(Trade.id.desc()).limit(min(limit, 50))).all()
@@ -189,8 +191,9 @@ def get_recent_trades(e: Engine, limit: int = 20) -> dict:
 
 
 def get_decision_log(e: Engine, limit: int = 30) -> dict:
-    from ..db import DecisionLog, SessionLocal
     from sqlalchemy import select
+
+    from ..db import DecisionLog, SessionLocal
 
     with SessionLocal() as db:
         rows = db.scalars(select(DecisionLog).where(DecisionLog.stage != "laya").order_by(DecisionLog.id.desc()).limit(min(limit, 60))).all()

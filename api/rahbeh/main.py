@@ -1,5 +1,6 @@
 """FastAPI app: REST API for the web app, plus the in-process scheduler that runs the market cycle."""
 
+import hmac
 import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -7,16 +8,26 @@ from typing import Literal
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-import hmac
-
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from .config import get_settings
-from .db import AgentCall, Alert, Shadow, DecisionLog, EquitySnapshot, Proposal, Review, SessionLocal, Trade, UserSettings, init_db
+from .db import (
+    AgentCall,
+    Alert,
+    DecisionLog,
+    EquitySnapshot,
+    Proposal,
+    Review,
+    SessionLocal,
+    Shadow,
+    Trade,
+    UserSettings,
+    init_db,
+)
 from .engine import Engine
 from .market.universe import FUNDAMENTALS, sector_of
 from .pipeline import features, halal, risk
@@ -435,7 +446,7 @@ def analyze(symbol: str, propose: bool = False):
     try:
         return E().analyze(symbol, propose)
     except ValueError as err:
-        raise HTTPException(404, str(err))
+        raise HTTPException(404, str(err)) from err
 
 
 @app.get("/api/mood")
